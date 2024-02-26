@@ -1,0 +1,18 @@
+---
+title: "Predicting final exam scores"
+subtitle: "[DSLC stages]: Analysis"
+format: 
+  html:
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+---
+
+
+Feel free to complete your analysis in this document

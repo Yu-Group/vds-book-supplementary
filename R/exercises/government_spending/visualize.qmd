@@ -1,0 +1,106 @@
+---
+title: "Visualizing government research and development spending"
+format: 
+  html:
+    toc: true
+    toc-location: right
+    number-depth: 4
+    theme: cerulean
+    df-print: kable
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+---
+
+## Background information
+
+The version of the data that we are using comes from "Tidy Tuesday" ([link](https://github.com/rfordatascience/tidytuesday/tree/master/data/2019/2019-02-12#federal-research-and-development-spending-by-agency)), but the original data source is from the American Association for the Advancement of Science ([link](https://www.aaas.org/programs/r-d-budget-and-policy/historical-trends-federal-rd)). The version of the data we are using has already been cleaned by Tom Mock (a Tidy Tuesday facilitator), and he shares the code he used to clean the data [here](https://github.com/rfordatascience/tidytuesday/tree/master/data/2019/2019-02-12#federal-research-and-development-spending-by-agency).
+
+## Load in the data
+
+```{r, message=FALSE}
+library(tidyverse)
+```
+
+First, we load in the three files.
+
+```{r, message=FALSE}
+fed_spending <- read_csv("data/fed_rd.csv")
+energy_spending <- read_csv("data/energy_spend.csv")
+climate_spending <- read_csv("data/climate_spend.csv") 
+```
+
+Let's take a look at the first few rows of each dataset.
+
+```{r}
+head(fed_spending)
+```
+
+```{r}
+head(energy_spending)
+```
+
+```{r}
+head(climate_spending)
+```
+
+## Prepare the data
+
+Next, we want to prepare the data (this is essentially pre-processing the data for our visualization analysis below). To simplify the data, we make the judgment call to aggregate/summarize the spending across all departments for each year.
+
+```{r}
+# aggregate the energy spending by year
+energy_by_year <- energy_spending %>%
+  group_by(year) %>%
+  summarise(energy_spending = sum(energy_spending))
+```
+
+```{r}
+# aggregate the climate spending by year
+climate_by_year <- climate_spending %>%
+  group_by(year) %>%
+  summarise(climate_spending = sum(gcc_spending))
+```
+
+```{r}
+# aggregate the federal spending by year
+fed_by_year <- fed_spending %>%
+  group_by(year) %>%
+  summarise(total_rd_budget = sum(rd_budget),
+            total_spending = unique(total_outlays),
+            discretionary_spending = unique(discretionary_outlays),
+            gdp = unique(gdp)) 
+```
+
+And then we can combine all three datasets together using `left_join()`, filter to the year 2000 onwards, and scale each of the relevant variables by one million.
+
+```{r}
+govt_spending <- fed_by_year %>%
+  # join the energy and climate spending to the federal spending data
+  left_join(energy_by_year, by = "year") %>%
+  left_join(climate_by_year, by = "year") %>%
+  # filter to the year 2000 onwards
+  filter(year >= 2000) %>%
+  # divide all relevant variables by 1000000
+  mutate_at(vars(gdp,
+                 total_rd_budget,
+                 total_spending,
+                 discretionary_spending,
+                 energy_spending,
+                 climate_spending),
+            function(x) x / 1000000)
+```
+
+## Exercise:
+
+Now it's your turn to re-create the figures specified in the exercise.
+
+You will probably want to write some code that starts like this:
+
+```{r}
+govt_spending %>%
+  ggplot() 
+  
+```

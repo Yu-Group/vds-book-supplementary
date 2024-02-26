@@ -1,0 +1,30 @@
+---
+title: "Exploring the world happiness data"
+subtitle: "[DSLC stages]: EDA"
+format: 
+  html:
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+    df-print: kable
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+---
+
+Conduct an EDA of the world happiness data in this document.
+
+
+```{r}
+library(readxl)
+library(tidyverse)
+# load in the cleaned data
+source("functions/cleanHappiness.R")
+happiness_orig <- read_xls("../data/WHR2018Chapter2OnlineData.xls", sheet = 1)
+happiness_clean <- cleanHappiness(happiness_orig,
+                                  .predictor_variable = "life_expectancy")
+
+```

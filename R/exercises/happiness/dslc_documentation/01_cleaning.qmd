@@ -1,0 +1,27 @@
+---
+title: "Cleaning the world happiness data"
+subtitle: "[DSLC stages]: Data cleaning and pre-processing"
+format: 
+  html:
+    toc: true
+    toc-location: right
+    number-depth: 4
+    theme: cerulean
+    df-print: kable
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+---
+
+If you want to perform data cleaning, you can do so in this document.
+
+
+```{r}
+library(readxl)
+library(tidyverse)
+
+# load in the original data
+happiness_orig <- read_xls("../data/WHR2018Chapter2OnlineData.xls", sheet = 1)
+```

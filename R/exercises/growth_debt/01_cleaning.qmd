@@ -1,0 +1,52 @@
+---
+title: "Re-evaluating Growth in the Time of Debt"
+subtitle: "[DSLC stages]: Data cleaning and pre-processing"
+format: 
+  html:
+    css: theme.css
+    toc: true
+    toc-location: right
+    number-depth: 4
+    theme: cerulean
+    df-print: kable
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+## Domain problem formulation
+
+
+## Data source overview
+
+
+
+## Step 1: Review background information {#sec-bg-info}
+
+
+### Data dictionary
+
+
+## Step 2: Loading in the data
+
+
+## Step 3: Examine the data and create action items
+
+### Finding invalid values
+
+
+### Assessing Column names
+
+
+
+### Assessing variable type
+
+
+### Assessing data completeness
+
+## Step 4: Clean and pre-process the data

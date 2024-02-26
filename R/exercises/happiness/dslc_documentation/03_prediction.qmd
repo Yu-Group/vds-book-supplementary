@@ -1,0 +1,29 @@
+---
+title: "Predicting world happiness"
+subtitle: "[DSLC stages]: Analysis"
+format: 
+  html:
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+---
+
+
+Conduct your predictive analysis of world happiness in this document.
+
+```{r}
+library(readxl)
+library(tidyverse)
+# load in the data and clean it
+source("functions/cleanHappiness.R")
+happiness_orig <- read_xls("../data/WHR2018Chapter2OnlineData.xls", sheet = 1)
+happiness_clean <- cleanHappiness(happiness_orig,
+                                  .predictor_variable = "life_expectancy")
+
+```
