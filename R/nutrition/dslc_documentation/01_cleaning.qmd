@@ -1,0 +1,618 @@
+---
+title: "[Chapter 6] Preparing the nutrition data"
+subtitle: "[DSLC stages]: Data cleaning and pre-processing"
+format: 
+  html:
+    toc: true
+    toc-location: right
+    number-depth: 4
+    theme: cerulean
+    df-print: kable
+execute:
+  echo: true
+editor: source
+number-sections: true
+editor_options: 
+  chunk_output_type: console
+embed-resources: true
+---
+
+
+Let's start by loading in the libraries that we will use in this document.
+
+```{r setup}
+#| label: setup
+#| message: false
+#| warning: false
+
+# load the libraries we will need in this document
+library(tidyverse)
+library(scales)
+library(patchwork)
+```
+
+
+## Domain problem formulation
+
+
+Our goal for this project is to develop an app that can provide users with health and nutritional information about their meals.
+
+
+
+## Data source overview
+
+
+The underlying data that we will use for this project comes from the US Department of Agriculture's (USDA) *Food Data Central*. The data dictionary can be found in the  `data/data_documentation/field_descriptions_apr2020.pdf` PDF file. If you plan on working with this data, we highly recommend that you glance through this document. Fukagawa *et al*.'s article "*USDA’s FoodData Central: what is it and why is it needed today?*" (also provided in the `data/data_documentation/` folder) provides an excellent summary of the variety of sources of information contained in this database. Refer to the PCS documentation for a more thorough summary of the data source (including the other datasets provided by USDA). 
+
+In this study, we focus on the Food and Nutrient Database for Dietary Studies  (FNDDS) food data survey, whose information was collected by the *What We Eat In America* dietary survey component of the National Health and Nutrition Examination Survey (NHANES). We originally downloaded this data in April of 2020, but the link we originally used to download the data is now broken (this is why it is helpful that we kept such meticulous notes about any websites that we download data from!). A new website for downloading the data can be found at [https://fdc.nal.usda.gov/download-datasets.html](https://fdc.nal.usda.gov/download-datasets.html) (as of late 2022).
+
+The FNDDS data contains 8,690 food items such as a bacon and cheese sandwich, honeydew melon, and carbonara pasta. Each food item has measurements from 57 different nutrients (variables), including iron, carbohydrates, fat, thiamine, riboflavin, and many more. 
+
+
+## Step 1: Review background information {#sec:bg-info}
+
+
+### Information on data collection 
+
+
+???Talk about how the FNDDS nutrient information was measured. 
+
+### Data dictionary
+
+If you have a data dictionary, print it here or provide a stable link. Discuss anything that you think it is important to point out for future you, or anyone else who might want to work with this data.
+
+
+### Answering questions about the background information
+
+In this section, we will go through the recommended background information questions from the Data Cleaning chapter.
+
+- *What does each variable measure?* Each variable measures the amount of a particular nutrient detected in 100g of the corresponding food item.
+
+- *How was the data collected?* ???Talk about how the measurements were collected
+
+- *What are the observational units?* The observational units are the food items.
+
+- *Is the data relevant to my project?* We don't quite have a sense of whether the food items included in the data are reflective of the generally available food items that we want to summarize in our app. One way we could check would be to go to the grocery store and to identify whether all of the food items are available in this dataset. Since we are just using this dataset for educational purposes, we won't do this, but if we were planning to put our eventual app into production, we would need to verify that the food items and nutrient measurements it contains are indeed relevant for a general consumer.
+
+
+
+## Step 2: Loading the data
+
+Since this data in its raw format is quite complex, loading a workable version of the data into our environment will involve loading and combining multiple different tables, and filtering to the relevant portion of the combined dataset.
+
+
+There are three CSV files that are contained within the `data/` folder (`food_nutrient.csv`, `food.csv`, and `nutrient_name.csv`. Our first task is to combine the information spread across these files into a single object using common variables.
+
+### `food_nutrient.csv`
+
+`food_nutrient.csv` is the main data file, which contains the amount of each nutrient for each food item. We will load this table in as `nutrient_amount`. 
+
+The identifier for each food item is encoded in the key variable `fdc_id` and the identifier for each nutrient variable is encoded in the key variable `nutrient_id`.
+
+```{r}
+#| message: false
+#| warning: false
+nutrient_amount <- read_csv("../data/food_nutrient.csv")
+head(nutrient_amount, 10)
+```
+
+### `food.csv`
+
+The names/descriptions of each food item are contained in `food.csv`, and can be joined using the food ID column, `fdc_id`. We will call this table `food_name`.
+
+```{r}
+#| message: false
+#| warning: false
+food_name <- read_csv("../data/food.csv")
+head(food_name, 10)
+```
+
+### `nutrient_name.csv`
+
+The names/descriptions of each nutrient are contained in `nutrient_name.csv`, and can be joined using the food ID column, `nutrient_id`. We will call this table `nutrient_name`.
+
+```{r}
+#| message: false
+#| warning: false
+nutrient_name <- read_csv("../Data/nutrient_name.csv")
+head(nutrient_name, 10)
+```
+
+
+
+### Combining the three tables into a single dataset
+
+Since the dataset we plan to work with will correspond to a combination of the information within these three datasets, we need to combine these three datasets. 
+
+As mentioned above, we will use the following *ID*  variables to join the tables together:
+
+- `fdc_id` for joining the info from the`nutrient_amount` and `food_names` tables, and 
+
+- `nutrient_id` for joining the info from the `nutrient_amount` and `nutrient_names` tables.
+
+
+However, we notice that the `nutrient_name` file does not provide a *unique* name for each `nutrient_name` value (which we will need for joining this nutrient name information to the `nutrient_amount` dataset). Below we show some examples of repeated nutrient names for different nutrient IDs:
+
+```{r}
+nutrient_name |>
+  filter(nutrient_id %in% c(1299, 1333))
+nutrient_name |>
+  filter(nutrient_id %in% c(1129, 1130))
+nutrient_name |>
+  filter(nutrient_id %in% c(1289, 1286))
+```
+
+Thus, we decided to simplify this dataset by *manually* creating a *unique* nutrient description/name for each `nutrient_id`.  An alternative approach is to write some code that chooses one of the existing non-unique names. But this is a little tricky in this particular scenario because the formatting of the nutrient names are very inconsistent and the code to choose the most consistently formatted option for each nutrient would not be straightforward. This is an example of one of the very tedious manual cleaning tasks that we sometimes need to conduct for complex and poorly formatted data.
+
+To prepare to join the three tables together, let's create a version of each of the `nutrient_amount` and `food_name` data frames that only contain the relevant columns.
+
+The relevant columns of `nutrient_amount` are the identifier variables `fdc_id` and `nutrient_id` and the amount of the relevant nutrient for the relevant food item, `amount`. (the other columns are almost always missing, except for `derivation_id`). 
+
+```{r}
+# create a lite version of the nutrient amount dataset, 
+# containing only the relevant variables
+nutrient_amount_lite <- nutrient_amount |> 
+  select(fdc_id, nutrient_id, amount)
+# look at a random set of 10 rows
+nutrient_amount_lite |> sample_n(10)
+```
+
+The relevant columns of the `food_name` dataset are `fdc_id` (the food ID) the food item identifier, `data_type` (The dataset that the food item comes from), and `description (a description of the food item).
+
+```{r}
+# create a lite version of the food name dataset, 
+# containing only the relevant variables
+food_name_lite <- food_name |>
+  select(fdc_id, data_type, description)
+food_name_lite |> sample_n(10)
+```
+
+#### Check uniqueness of ID variables
+
+Before we join the datasets together, let's make sure the ID variables don't have any duplicates. The only entry in the `n` column of each of the following tables should be 1.
+
+```{r}
+# count the number of times each combination of `fdc_id` and `nutrient_id` appear in nutrient_amount. 
+# There should only be *one* incidence of each combination
+# this will take a moment to run
+nutrient_amount |>
+  count(fdc_id, nutrient_id) |>
+  distinct(n)
+```
+
+
+```{r}
+# count the number of times each `fdc_id` appears in food_name_lite. 
+# There should only be *one* incidence of each combination
+food_name_lite |> 
+  count(fdc_id) |>
+  distinct(n)
+```
+
+```{r}
+# count the number of times each `nutrient_id` appears in nutrient_name. 
+# There should only be *one* incidence of each combination
+nutrient_name |> 
+  count(nutrient_id) |>
+  distinct(n)
+```
+
+
+#### Join the tables
+
+Finally, let's "left join" (which means keep all of the data in the first data frame on the left, and add the information from the second data frame on the right to it) the `nutrient_amount_lite` data frame with the `food_name_lite` data frame using the `fdc_id` key column. Then we will further "left join" the result of that  initial join to the `nutrient_name` dataset using the `nutrient_id` key column.
+
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Data loading action item: Join the nutrient name and food name information to the main nutrient amounts data**
+:::
+The nutrient and food names are stored in separate files and will need to be "joined" onto the main dataset. 
+::::
+
+
+We will call the resulting data frame simply `food`:
+
+```{r}
+food <- nutrient_amount_lite |> 
+  left_join(food_name_lite, by = "fdc_id") |>
+  left_join(nutrient_name, by = "nutrient_id") 
+```
+
+The first 10 rows:
+
+```{r}
+head(food, 10)
+```
+
+A random sample of 10 rows:
+
+```{r}
+food |> sample_n(10)
+```
+
+Note that we will include this code in the cleaning function that we write below, but it will be helpful to have a joined version of this data in our environment for our explorations below. 
+
+Let's check to make sure that the `food` data frame has the same number of rows as the original `nutrient_amount_lite` data frame. (If it has more rows, this means that some of the ID values were duplicated).
+
+
+```{r}
+dim(nutrient_amount)
+dim(food)
+```
+
+
+Looks good!
+
+### Filtering to the relevant portion of the data
+
+The dataset provided contains data from 8 different sources, referred to within the `data_type` column. (This actually doesn't match what we expected from the data documentation, which states that there are 5 different sources.)
+
+The following diagram shows how many unique food items there are from each source, and how many unique nutrients are measured in each dataset.
+
+```{r}
+food |> 
+  group_by(data_type) |>
+  summarise(n_foods = n_distinct(fdc_id),
+            n_nutrients = n_distinct(nutrient_id)) |>
+  ggplot() +
+  geom_point(aes(x = n_foods, y = n_nutrients)) +
+  geom_text(aes(x = n_foods, y = n_nutrients, label = data_type),
+            nudge_x = 5000, hjust = 0) +
+  scale_x_continuous(limits = c(0, 380000), breaks = c(0, 1, 2, 3) * 100000,
+                     labels = comma(c(0, 1, 2, 3) * 100000))
+```
+
+They are clearly all fairly different, and `branded_food` has a lot more food items included in it than the other datasets.  
+
+A natural question is whether each source reports the same nutrient measurements for each food items. The heatmap in @fig-heat-nutrient-prop shows that the `survey_fndds_food` and `sr_legacy_food` tend to contain similar nutrients, but `sub_sample_food` and `agricultural_aquisition` tend not to contain as much of a variety of measurements across the food items (based on the 20 most common nutrients reported in the data).
+
+```{r}
+#| label: fig-heat-nutrient-prop
+#| fig-cap: "A heatmap showing the proportion of foods that report each nutrient measurement for each data source"
+#| warning: false
+#| message: false
+
+
+# identify 20 most common nutrients
+top_20_nutrients <- food |>
+  count(nutrient_name) |>
+  drop_na() |>
+  arrange(desc(n)) |>
+  head(20) |>
+  pull(nutrient_name)
+
+# make a heatmap of the proportion of foods with each nutrient measured for 
+# each data source
+food |>
+  # filter to the top 20 nutrients
+  filter(nutrient_name %in% top_20_nutrients) |>
+  distinct(data_type, fdc_id, nutrient_name) |>
+  # Count the number of food items in each data source
+  group_by(data_type) |>
+  mutate(n_total_foods = n_distinct(fdc_id)) |>
+  ungroup() |>
+  # For each dataset and each nutrient, count the proportion of food items
+  # in the dataset for which a measurement of the nutrient is recorded
+  group_by(data_type, nutrient_name) |>
+  summarise(total_foods = unique(n_total_foods),
+            prop = n_distinct(fdc_id) / total_foods) |>
+  # plot these proportions in a heatmap
+  ggplot() +
+  geom_tile(aes(y = data_type, x = nutrient_name, fill = prop),
+            color = "grey90") +
+  scale_fill_gradient(low = "white", high = "grey20", na.value = "white") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+```
+
+
+Notice that the `sub_sample_food`, `foundation_food`, `branded_food`, and `agricultural_aquisition` datasets are missing a lot of the common nutrients are only observed for a small proportion of food items. Thus, we will focus on the `survey_fndds_food` and `sr_legacy_food` datasets for our analysis. Since these are distinct data sources, we can use one (`survey_fndds_food`) as our current data, and the other `sr_legacy_food` as our "future" or "external" data for our predictability evaluations!
+
+
+```{r}
+food_fndds <- food |>
+  filter(data_type == "survey_fndds_food")
+```
+
+
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Data loading action item: Filter to the FNDDS food dataset**
+:::
+The dataset contains nutrition information from many sources. We want to filter to just the FNDDS dataset (`data_type == "survey_fndds_food"`).  We will use the `sr_legacy_food` dataset as the external/future data for our predictability evaluations.
+::::
+
+
+
+Note that it is very important to document these thought processes, otherwise you might come back to this project years later and not remember why you chose to focus on just one of the data sources for your analysis^[During my first analysis of this dataset, several years ago, I (Rebecca) focused the entire analysis on `survey_fndds_food` but I didn't document why I made this decision. It took me an embarrassingly long time to remember why I made that original decision.].
+
+
+
+
+## Step 3: Examine the data
+
+In this section we explore the common messy data traits to identify any cleaning action items.
+
+### Invalid values
+
+Based on our understanding of nutrient measurements, we should have no negative values, in our data. The table below shows the min, mean, and max for each variable.
+
+```{r}
+food_fndds |>
+  group_by(nutrient_name) |>
+  summarise(min_amount = min(amount),
+            mean_amount = mean(amount),
+            max_amount = max(amount))
+```
+
+While it is clear that there are no negative values, it isn't clear whether there are unusual non-negative values, since we don't have a sense of the natural ranges of each nutrient measurement. This will be a lot easier to visualize in histograms than in a table.
+
+@fig-nutrient-dist shows the distribution of each nutrient. There certainly appear to be several very skewed distributions (with lots of very low values and just a few large values), but nothing that necessarily looks "invalid".
+
+
+```{r}
+#| label: fig-nutrient-dist
+#| fig-cap: "Histograms showing the distribution of each nutrient"
+#| message: false
+#| warning: false
+#| fig-height: 12
+food_fndds |>
+  ggplot() +
+  geom_histogram(aes(x = amount), col = "white") +
+  facet_wrap(~nutrient_name, scales = "free", ncol = 4) +
+  theme(axis.text.y = element_blank())
+```
+
+
+### Missing values
+
+#### Missing nutrient names
+
+It doesn't appear as though there are any missing `amount` values, but there certainly seem to be some missing `nutrient_name` measurements (12%):
+
+```{r}
+food_fndds |> 
+  # compute the proportion of missing values for each column
+  map_dbl(~sum(is.na(.)) / nrow(food_fndds))
+```
+
+Notice that there are no missing `nutrient_id` values however. The following table lists the nutrient IDs with no available `nutrient_name`. 
+
+```{r}
+missing_nutrient_ids <- food_fndds |>
+  filter(is.na(nutrient_name)) |>
+  pull(nutrient_id) |> 
+  unique()
+missing_nutrient_ids
+```
+
+These IDs simply *don't exist* in the original `nutrient_name` data file that helped us convert the `nutrient_id` to a `nutrient_name`.
+
+All we can really do here is (since we are not in contact with the people who collected this data) is to drop these nutrient IDs (or create an "other" nutrient variable). 
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Data cleaning action item: Remove nutrients whose name is missing**
+:::
+Remove the 8 nutrient variables that don't have a corresponding `nutrient_name`.
+::::
+
+
+Note that since this is akin to removing a *variable* rather than an *observation* it is not introducing bias into our data.
+
+
+### Data format
+
+Let's look at how the data is formatted 
+
+```{r}
+head(food_fndds)
+```
+
+Is this dataset in a "tidy" format? Recall that the definition of a tidy dataset is one where 
+
+
+- Each *row* corresponds to the data for a *single observational unit* (if the data for a single observational unit is spread across multiple rows, most algorithms will treat these as different observational units). 
+
+- Each column corresponds to a single type of measurement. 
+
+
+This is not the case for the food dataset printed above. The observational units for this dataset are the individual food items, and since each different nutrient measurement lies on its own row, there are multiple rows in the data for each food item.
+
+For instance, all of the rows below are for a single data unit: "Apple, raw".
+
+```{r}
+food_fndds |>
+  filter(description == "Apple, raw")
+```
+
+Moreover, the `amount` variable contains multiple types of measurements: it contains measurements for protein, for far, for calories, for vitamin C, etc. 
+
+This data is clearly *not* in a "tidy" format. Instead, it is in a long format, which is typically (but not always) harder to work with.
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Data cleaning action item: Pivot the data to a wider tidier format**
+:::
+The data is in a long-format, so we need to pivot it into a wider format so that it is considered "tidy".
+::::
+
+The tidy format for the food dataset will look like this:
+
+```{r}
+food_fndds |> 
+  select(nutrient_name, amount, description) |> 
+  drop_na() |> 
+  pivot_wider(names_from = "nutrient_name", 
+              values_from = "amount") |>
+  head()
+```
+
+### Column names
+
+The column names are actually fairly reasonably formatted (lower-case and underscore-separated). Although when we reformat the data into the tidy format (see previous section), the column names will become the nutrient names (which are also fairly reasonably formatted).
+
+
+
+
+
+### Variable type
+
+As far as we can tell, each column has a reasonable type. The ID columns could be converted to factors, but we will likely remove them in the cleaned version of the data because they are redundant when we have `description` and `nutrient_name`.
+
+```{r}
+food_fndds |>
+  map_chr(class)
+```
+
+
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Data cleaning action item: Remove ID variables**
+:::
+The ID variables are redundant after joining the `description` and `nutrient_name` columns to the food data so they can be removed.
+::::
+
+
+
+### Incomplete data
+
+Finally, we arrive at the question of whether the data is "complete". What does it mean for this dataset to be complete? It means that every food item has a measurement for every nutrient variable. 
+
+The code below shows that *every* food item has exactly 65 rows associated with it.
+
+```{r}
+food_fndds |>
+  count(description) |>
+  distinct(n)
+```
+
+Which indicates that our data is complete
+
+### [project-specific] Exploring the `fat` hierarchy
+
+
+Through our explorations above, we noticed that there are several `fat`-related variables that may have a hierarchical relationship. For instance, the data contains a variable simply called `fat`, but it also contains more specific fat-related variables such as `saturated_fat`, `monounsaturated_fat`, and `polyunsaturated fat`, and in addition also has even more specific fat-related variables, such as `oleic_acid`, `caproic_acid`, `palmitic_acid` and 16 other "fatty acid" variables. The scatter plot of `fat` against the sum of `saturated_fat`, `monounsaturated_fat`, and `polyunsaturated fat` shows that `fat` is *almost* exactly equal to the sum of `saturated_fat`, `monounsaturated_fat`, and `polyunsaturated fat`. 
+
+
+
+
+```{r}
+food_fndds |> 
+  select(description, nutrient_name, amount) |>
+  drop_na() |>
+  # convert to tidy format
+  pivot_wider(names_from = "nutrient_name", values_from = "amount") |>
+  # compute the sum of the second-tier fat variables
+  transmute(fat, 
+            fat_sum = saturated_fat + monounsaturated_fat + polyunsaturated_fat) |> 
+  ggplot() + 
+  geom_point(aes(x = fat, y = fat_sum), 
+             alpha = 0.7)
+```
+
+If our analyses call for more detailed fat-related variables, it might make sense to consider removing the "higher-level" variables (such as `fat`, possibly as well as `saturated_fat`, `monounsaturated_fat` and `polyunsaturated_fat`). For now, we will choose not to remove `fat`, but this is a judgment call.
+
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Data pre-processing judgment call: Keep higher-level fat variables**
+:::
+Since it seems that `fat` is almost equal to the sum of `saturated_fat`, `monounsaturated_fat` and `polyunsaturated_fat`, it may make sense to remove `fat` from the data before conducting principal component analysis.
+::::
+
+
+
+## Step 4: Clean the data
+
+Now we implement the cleaning action items that we proposed in the sections above. Since the cleaning and pre-processing tasks are fairly separate (the pre-processing tasks will mostly involve variable transformations for principal component analysis), we will write separate `cleanFoodData()` and `preProcessFoodData()` functions.
+
+
+### The cleaning function
+
+The cleaning function `cleanFoodData()` that implements all of the action items we identified is shown below and is saved in the file "functions/cleanFoodData.R".
+
+```{r}
+#| file: functions/cleanFoodData.R
+```
+
+
+### Creating the cleaned data
+
+This cleaning function can then be used to clean the data in subsequent analysis documents as follows:
+
+
+```{r}
+#| message: false
+#| warning: false
+
+# source the cleaning function code
+source("functions/cleanFoodData.R")
+# load in all of the raw data objects
+nutrient_amount <- read_csv("../data/food_nutrient.csv")
+food_name <- read_csv("../data/food.csv")
+nutrient_name <- read_csv("../data/nutrient_name.csv")
+
+# create the clean dataset
+food_fndds_clean <- cleanFoodData(.nutrient_amount_data = nutrient_amount, 
+                                  .food_name_data = food_name, 
+                                  .nutrient_name_data = nutrient_name, 
+                                  .select_data_type = "survey_fndds_food")
+# look at the cleaned data object
+head(food_fndds_clean)
+```
+
+
+We can also load one of the other datasets by specifying alternative `.select_data_type` options. For example, we can load the SR Legacy data using: 
+
+```{r}
+food_legacy_clean <- cleanFoodData(.nutrient_amount_data = nutrient_amount, 
+                                   .food_name_data = food_name, 
+                                   .nutrient_name_data = nutrient_name, 
+                                   .select_data_type = "sr_legacy_food")
+head(food_legacy_clean)
+```
+
+
+## Pre-processing
+
+Two very common pre-processing steps in PCA analysis is to standardize (mean-center and SD-scale) the variables, and whether to *log-transform* the (non-negative) variables in order to make their distributions more Normal (since PCA, in theory, is more "effective" on Gaussian data). Neither of these steps are strictly *necessary* (although the *interpretation* of the principal components will change if you don't standardize the variables - see book for details). 
+
+So that we can easily explore the impacts of these pre-processing steps in our PCS analyses, we will write a re-usable pre-processing function. Note that there is an option (which is defaulted to TRUE) to remove the moisture, alcohol, caffeine, and theobromine nutrients, since we decided that these did not fit into our idea of the kinds of nutrient types we want to summarize.
+
+Note that we certainly could have included these pre-processing steps in the data cleaning function (and just had one `prepareFoodData()` function), but we found it easier to have two separate functions for this particular project.
+
+```{r}
+#| file: functions/preProcessFoodData.R
+```
+
+
+We can create pre-processed versions of the cleaned food data as follows.
+
+```{r}
+source("functions/preProcessFoodData.R")
+food_fndds_preprocessed <- preProcessFoodData(.food_clean = food_fndds_clean, 
+                                              # these are the default arguments
+                                              .log_transform = TRUE,
+                                              .center = TRUE,
+                                              .scale = TRUE,
+                                              .remove_fat = FALSE)
+head(food_fndds_preprocessed)
+```
+
+This can also be applied to the external validation data.
+
+```{r}
+food_legacy_preprocessed <- preProcessFoodData(food_legacy_clean,
+                                               # these are the default arguments
+                                               .log_transform = TRUE,
+                                               .center = TRUE,
+                                               .scale = TRUE,
+                                               .remove_fat = FALSE)
+head(food_legacy_preprocessed)
+```
+
+

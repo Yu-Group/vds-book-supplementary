@@ -1,0 +1,1595 @@
+---
+title: "[Chapter 6] Applying PCA to the nutrition data"
+subtitle: "[DSLC stages]: Analysis"
+format: 
+  html:
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+editor_options: 
+  chunk_output_type: console
+---
+
+In this document, you will find the a Principal Component Analysis (PCA) of the food nutrition data. Our goal is to come up with some meaningful "summary nutrient" variables that can be used to summarize the nutrient variables in each nutrient group.
+
+We will first conduct an analysis for just the major minerals nutrient group data, and will then use some advanced R code to automate the principal component analysis across each nutrient group.
+
+Note also, that when defining functions, we often define the arguments with a period (`.`) preceding the argument name, such as `function(.data, .argument1, .argument2)`. This is purely to make it easier to see what is an external object and what is an argument of the function when looking at the code (objects with a preceding period only exist within the function "environment").
+
+The following code sets up the libraries and creates cleaned and pre-processed data that we will use in this document.
+
+```{r}
+#| message: false
+#| warning: false
+library(tidyverse)
+library(patchwork)
+
+# source the cleaning function code
+source("functions/cleanFoodData.R") 
+source("functions/preProcessFoodData.R")
+# load in all of the raw data objects
+nutrient_amount <- read_csv("../data/food_nutrient.csv")
+food_name <- read_csv("../data/food.csv")
+nutrient_name <- read_csv("../data/nutrient_name.csv")
+
+# Clean the FNDDS data
+food_fndds <- cleanFoodData(.nutrient_amount_data = nutrient_amount, 
+                            .food_name_data = food_name,
+                            .nutrient_name_data = nutrient_name, 
+                            # fndds is the default value
+                            .select_data_type = "survey_fndds_food")
+# Preprocess the FNDDS data
+food_fndds_scaled <- preProcessFoodData(food_fndds, 
+                                        # these are the default args
+                                        .log_transform = FALSE,
+                                        .center = FALSE,
+                                        .scale = TRUE,
+                                        .remove_fat = FALSE)
+food_fndds_log_scaled <- preProcessFoodData(food_fndds, 
+                                            # these are the default args
+                                            .log_transform = TRUE,
+                                            .center = FALSE,
+                                            .scale = TRUE,
+                                            .remove_fat = FALSE)
+# Clean the Legacy data
+food_legacy <- cleanFoodData(.nutrient_amount_data = nutrient_amount, 
+                             .food_name_data = food_name,
+                             .nutrient_name_data = nutrient_name, 
+                             .select_data_type = "sr_legacy_food")
+# Preprocess the Legacy data
+food_legacy_log_scaled <- preProcessFoodData(food_legacy,
+                                             # these are the default args
+                                             .log_transform = TRUE,
+                                             .center = FALSE,
+                                             .scale = TRUE,
+                                             .remove_fat = FALSE)
+```
+
+
+## Applying principal component analysis to the full dataset
+
+
+Let's start by applying simple PCA algorithm to the full food (FNDDS) dataset and see what happens. We will for now just focus on the scaled and un-centered (i.e. each variable has only been divided by its standard deviation). 
+
+Ideally the components we identify will each correspond to a "primary" type of nutrient (spoiler: this doesn't work!). 
+
+First, we conduct SVD on the scaled, un-centered dataset.
+
+```{r}
+pca <- food_fndds_scaled |>
+  select(-description) |>
+  svd()
+```
+
+The code below shows that the first principal component explains `r round(pca$d[1]^2 / sum(pca$d^2), 2) * 100`% of the total variability (relative to zero) in the data.
+
+```{r}
+prop_var <- pca$d^2 / sum(pca$d^2)
+tibble(PC = 1:length(prop_var),
+       `Variability explained` = round(prop_var, 2),
+       `Cumulative variability explained` = round(cumsum(prop_var), 2)) |>
+  head(5)
+```
+
+The following table shows the 10 variables with the highest loading on PC1. PC1 mostly seems to be capturing fats.
+
+```{r}
+# extract the loadings
+loadings <- pca$v
+# look at the 10 largest (absolute value) loadings for PC1
+tibble(nutrient = colnames(select(food_fndds_scaled, -description)),
+       pc1_loading = loadings[, 1]) |>
+  # arrange in absolute value descending order
+  arrange(desc(abs(pc1_loading))) |> 
+  head(10)
+```
+
+The following table shows the 10 variables with the highest loading on PC2. They mostly seem to be vitamins (negative loading), but some fats also appear.
+
+```{r}
+data.frame(nutrient = colnames(select(food_fndds_scaled, -description)),
+           pc2_loading = loadings[, 2]) |>
+  arrange(desc(abs(pc2_loading))) |>
+  head(10)
+```
+
+There is clearly some kind of "nutrient type" being captured by these two PCs, but the fact that the vast majority of the variability in the data is contained within the first PC, and that each PC involves variables from across several different "categories" (e.g., PC2 contains fats and vitamins) means that they will not be particularly useful for creating summary variables of individual nutrient types.
+
+Regardless, let's take a look at these principal components in terms of how the foods seem to be distributed in PC space.
+
+First, we need to create a version of the nutrient dataset that has been transformed into PC space. This involves multiplying the original data matrix with the PC loading matrix. The resulting dataset (`pca_scaled_x`) has one row for each food item, but instead of the nutrients as columns, it has the PCs. 
+
+```{r}
+#| warning: false
+#| message: false
+
+
+# create the PCA-transformed dataset
+# first, create a numeric matrix version of the original data
+x <- food_fndds_scaled |>
+  select(-description) |>
+  as.matrix()
+# then multiply the original data and the PCA loadings
+pca_scaled_x <- (x %*% pca$v) |>
+  # convert to a tibble
+  as_tibble()
+# make the tibble pretty and easier to work with by
+# changing the column names to PC1, PC2, etc
+colnames(pca_scaled_x) <- paste0("PC", 1:ncol(pca_scaled_x))
+
+# add back the food descriptions column
+pca_scaled_x <- pca_scaled_x |>
+  mutate(description = food_fndds_scaled$description) |>
+  # reorder the rows
+  select(description, everything())
+
+# look at the object
+head(pca_scaled_x)
+```
+
+Now we can visualize our foods in PC space. @fig-pc1-pc2 shows the distribution of foods in the (PC1, PC2) space. Overall, it seems as though there is very little information in PC2 (the spread is mostly in the PC1 direction). 
+
+
+```{r}
+#| label: fig-pc1-pc2
+#| fig-cap: "A scatterplot of PC1 vs PC2"
+
+# plot PC1 vs PC2
+pca_scaled_x |>
+  ggplot() +
+  geom_point(aes(x = PC1, y = PC2), alpha = 0.3, color = "grey60") +
+  geom_text(aes(x = PC1, y = PC2, label = str_trunc(description, 15)), 
+            check_overlap = TRUE, hjust = 0)
+```
+
+
+While it certainly seems as though these principal components are creating a space in which similar food items are close together, these principal components still aren't going to be helpful for generating intuitive summary variables for each nutrient group since every nutrient variable contributes to each principal component, just with different weights. 
+
+
+## Defining nutrient groups
+
+Thus, let's shift our goal for this project to create a summary variable *separately for each nutrient group*. That is, we want to apply PCA separately to group of nutrient variables that we identified in the EDA doc. 
+
+We will aim to create a summary variable based on the first Principal Component computed separately for each of the following groups:
+
+1. **Vitamins**: vitamin C, vitamin B6, vitamin B12, riboflavin, thiamine, folate, niacin, beta carotene, alpha carotene, lutein zeaxanthin, phylloquinone, alpha tocopherol, retinol, lycopene, cryptoxanthin
+
+1. **Fats**: fat, saturated fat, monounsaturated fat, polyunsaturated fat, cholesterol, and all of the fatty acids
+
+1. **Major minerals**: sodium, potassium, calcium, phosphorus, magnesium, total choline
+
+1. **Trace minerals**: iron, zinc, selenium, copper
+
+1. **Carbohydrates**: carbohydrates, total dietary fiber
+
+1. **Calories**: calories
+
+1. **Protein**: protein
+
+Since the last two groups (calories and protein) only consist of one nutrient each, we don't need to apply PCA to summarize these groups.
+
+
+
+
+## Applying PCA to the major minerals data only
+
+Let's focus first just on the scaled but un-centered major minerals nutrient dataset that we explored in Chapter 7. 
+
+```{r}
+food_fndds_scaled_major_minerals <- food_fndds_scaled |>
+  select(description, sodium, potassium, calcium, 
+         phosphorus, magnesium, total_choline)
+```
+
+
+Then we can apply PCA to it using SVD:
+
+```{r}
+major_minerals_pca <- food_fndds_scaled_major_minerals |>
+  # remove the description character variable
+  select(-description) |>
+  # apply svd
+  svd()
+# print out the names of the objects contained within major_minerals_pca
+names(major_minerals_pca)
+```
+
+
+Let's look at the right-singular vector matrix for the major minerals dataset. The rows correspond to the major minerals, and the columns correspond to the PCs.
+
+```{r}
+# extract the right-singular vectors
+major_minerals_v <- major_minerals_pca$v
+# add column and rownames
+colnames(major_minerals_v) <- paste0("PC", 1:ncol(major_minerals_v))
+rownames(major_minerals_v) <- colnames(food_fndds_scaled_major_minerals)[-1]
+# print the matrix V (rounded to 3dp)
+round(major_minerals_v, 3)
+
+```
+
+### Create the PCS-transformed dataset
+
+To create the PCA-transformed dataset, we need to multiply the original data by this matrix $V$
+
+```{r}
+# get a matrix version of the original major minerals dataset (X)
+major_minerals_x <- food_fndds_scaled_major_minerals |>
+  select(-description) |>
+  as.matrix()
+# compute the PCA transformation
+pca_major_minerals_x <- major_minerals_x %*% major_minerals_v
+
+# add the description 
+pca_major_minerals_x <- pca_major_minerals_x |>
+  as_tibble() |>
+  mutate(description = food_fndds_scaled_major_minerals$description, .before = "PC1")
+pca_major_minerals_x
+
+```
+
+Let's extract the principal components for the "Herring, smoked, kippered" food item. 
+
+```{r}
+pca_major_minerals_x |> 
+  filter(description == "Herring, smoked, kippered")
+```
+
+
+### Visualizing food items in PC space
+
+Next, we can look at a sample of 500 food items in PC1-PC2 space.
+
+```{r}
+set.seed(23178989)
+pca_major_minerals_x |>
+  sample_n(500) |>
+  ggplot() +
+  geom_point(aes(x = PC2, y = -PC1), alpha = 0.2, col = "grey50") +
+  geom_text(aes(x = PC2, y = -PC1, 
+                # show just the first word of the description
+                label = map_chr(description, ~str_split(., " ", simplify = TRUE)[1])), 
+            check_overlap = TRUE, alpha = 0.9, nudge_x = 0.5, hjust = 0)
+```
+
+Note that in the book we consider the negative of PC1, so we negate the PC1 axis here for comparability.
+
+Similar food items seem to be similarly positioned in PC1-PC2 space.
+
+### Proportion of variability explained 
+
+
+We can compute the proportion of variability explained by each component using the singular value matrix D, which is 
+
+```{r}
+diag(major_minerals_pca$d)
+```
+
+The proportion of variability explained (relative to zero because we didn't center the data) for each component is:
+
+```{r}
+(major_minerals_pca$d^2) / sum(major_minerals_pca$d^2)
+```
+
+And we can create a scree plot too:
+
+```{r}
+tibble(PC = 1:length(major_minerals_pca$d),
+       prop_explained = (major_minerals_pca$d^2) / sum(major_minerals_pca$d^2)) |>
+  ggplot() +
+  geom_line(aes(x = PC, y = prop_explained))
+```
+
+There is a very clear elbow at the second PC, which implies that taking the first (and maybe second) PC corresponds to a reasonable summary of the dataset.
+
+
+
+### Log-transformation
+
+
+The results above did not involve computing a log-transformation of any of the variables. But as we saw in `02_eda.qmd`, the symmetry of many of the variables' distributions were much improved by computing a log-transformation. It may also be the case that PCA is able to compute more meaningful components if we do compute a log-transformation. 
+
+While we could relegate this section to a stability assessment, since we believe that our results might actually be *improved* by conducting a log-transformation, we will do an in-depth assessment here (if we didn't think the log-transformation would make any difference, we would instead do this exploration as a stability analysis). 
+
+
+
+First, let's create the log-transformed scaled major minerals dataset
+
+```{r}
+food_fndds_log_scaled_major_minerals <- food_fndds_log_scaled |>
+  select(description, sodium, potassium, calcium, 
+         phosphorus, magnesium, total_choline)
+```
+
+
+Then we can apply PCA to it using SVD:
+
+```{r}
+major_minerals_log_pca <- food_fndds_log_scaled_major_minerals |>
+  # remove the description character variable
+  select(-description) |>
+  # apply svd
+  svd()
+```
+
+
+Let's look at the right-singular vector matrix for the major minerals dataset. The rows correspond to the major minerals, and the columns correspond to the PCs.
+
+```{r}
+# extract the right-singular vectors
+major_minerals_log_v <- major_minerals_log_pca$v
+# add column and rownames
+colnames(major_minerals_log_v) <- paste0("PC", 1:ncol(major_minerals_log_v))
+rownames(major_minerals_log_v) <- colnames(food_fndds_log_scaled_major_minerals)[-1]
+# print the matrix V (rounded to 3dp)
+round(major_minerals_log_v, 3)
+```
+
+
+
+To create the PCA-transformed dataset, we need to multiply the original data by this matrix $V$
+
+```{r}
+# get a matrix version of the original major minerals dataset (X)
+major_minerals_log_x <- food_fndds_log_scaled_major_minerals |>
+  select(-description) |>
+  as.matrix()
+# compute the PCA transformation
+pca_major_minerals_log_x <- major_minerals_log_x %*% major_minerals_log_v
+
+# add the description 
+pca_major_minerals_log_x <- pca_major_minerals_log_x |>
+  as_tibble() |>
+  mutate(description = food_fndds_log_scaled_major_minerals$description, .before = "PC1")
+pca_major_minerals_log_x
+```
+
+Let's extract the principal components for the "Herring, smoked, kippered" food item. 
+
+```{r}
+pca_major_minerals_log_x |> 
+  filter(description == "Herring, smoked, kippered")
+```
+
+Next, we can look at a sample of 500 food items in PC1-PC2 space.
+
+```{r}
+set.seed(23178989)
+pca_major_minerals_log_x |>
+  sample_n(500) |>
+  ggplot() +
+  geom_point(aes(x = PC2, y = PC1), alpha = 0.2, col = "grey50") +
+  geom_text(aes(x = PC2, y = PC1, 
+                # show just the first word of the description
+                label = map_chr(description, ~str_split(., " ", simplify = TRUE)[1])), 
+            check_overlap = TRUE, alpha = 0.9, nudge_x = 0.5, hjust = 0)
+```
+
+
+The food items seem much more spread out in the PC1-PC2 space based on this log-transformed dataset.
+
+We can compute the proportion of variability explained by each component:
+
+```{r}
+(major_minerals_log_pca$d^2) / sum(major_minerals_log_pca$d^2)
+```
+
+The first component now explains almost 100% of the variability in the original major minerals dataset.
+
+Overall, this log-transformed version of PC1 does seem to be a much better summary variable than the version of PC1 computed on the untransformed data.
+
+
+### [Exercise: to complete] Compute the correlation between the principal component variables and each of the original variables
+
+For the major minerals dataset, compute the correlation between each original major mineral nutrient variable and the principal components you computed. Compare these correlations with the variable loadings. You may do this here, and/or based on the log-transformed PCA results below. 
+
+To get you started, here is one way to compute the correlation between PC1 and the original sodium variable. 
+
+```{r}
+cor(pca_major_minerals_log_x$PC1, food_fndds_log_scaled_major_minerals$sodium)
+```
+
+
+
+
+### PCS assessment
+
+
+#### Predictability
+
+Let's look at the results of these principal components on the (scaled and log-transformed) Legacy dataset. 
+
+```{r}
+# create the legacy (log, scaled) major minerals dataset
+food_legacy_log_scaled_major_minerals <- food_legacy_log_scaled |>
+  select(description, sodium, potassium, calcium, 
+         phosphorus, magnesium, total_choline)
+# convert it to a numeric matrix
+legacy_major_minerals_x <- food_legacy_log_scaled_major_minerals |>
+  select(-description) |>
+  as.matrix()
+# create the PC components for the legacy major minerals dataset
+pca_legacy_major_minerals_log_x <- legacy_major_minerals_x %*% major_minerals_log_v
+
+# add the food descriptions
+pca_legacy_major_minerals_log_x <- pca_legacy_major_minerals_log_x |>
+  as_tibble() |>
+  mutate(description = food_legacy_log_scaled_major_minerals$description, .before = "PC1")
+pca_legacy_major_minerals_log_x
+```
+
+Then we can look at a random sample of 500 legacy food items in the PC1 and PC2 space:
+
+```{r}
+set.seed(169)
+pca_legacy_major_minerals_log_x |>
+  sample_n(500) |>
+  ggplot() +
+  geom_point(aes(x = PC2, y = -PC1), alpha = 0.5, color = "grey50") +
+  geom_text(aes(x = PC2, y = -PC1, 
+                # show just the first word of the description
+                label = map_chr(description, ~str_split(., " ", simplify = TRUE)[1])), 
+            check_overlap = TRUE, alpha = 0.9, nudge_x = 0.2, hjust = 0)
+```
+
+(Note that we are showing the negative of PC1 in the book, so we negate it in the plot above for comparison purposes.) 
+
+Overall it looks as though similar legacy food items are again being placed close together in PC1 and PC2 space, and the distribution of food items in PC1-PC2 space is very similar. 
+
+
+#### Stability
+
+##### Stability to data perturbations
+
+Let's investigate the stability of our principal component analysis results under the two following types of data perturbations:
+
+1. Bootstrapping: Since it is plausible that a different set of food items may have been included in the data, and the food items are likely to be exchangeable, we will use a bootstrap sampling perturbation to reflect the sampling uncertainty.
+
+1. Measurement noise: Since it is plausible that the individual nutrient measurements in the data may have been measured or computed slightly differently, we will add a random number to each measurement that comes from a Normal distribution with mean 0 and standard deviation equal to 0.2 multiplied by the mean of the relevant column. This is motivated by the fact that the FDA has a 20% allowable margin of error for nutrition information.
+
+
+Below, we compute *four* such perturbed versions of the FNDDS dataset.
+
+```{r}
+set.seed(98634)
+food_fndds_major_minerals_perturb <- map(1:4, function(iter) {
+  # conduct the perturbations
+  food_fndds_log_scaled_major_minerals |>
+    # add random noise
+    # add random noise to each observation (noise is equal to 0 on average)
+    mutate(across(where(is.numeric), 
+                  function(x) x + rnorm(n(), 0, 0.2 * mean(x))))  |>
+    # if any observations are negative, round them up to 0
+    mutate(across(where(is.numeric), 
+                  function(x) if_else(x < 0, true = 0, false = x))) |>
+    # take a bootstrap sample
+    sample_frac(1, replace = TRUE)
+})
+```
+
+
+Let's take a look at how the sodium and magnesium values have been perturbed. Below we print the perturbed sodium and magnesium values alongside the original sodium and magnesium values for 10 randomly selected food items for the first perturbed dataset. The values don't look too aggressively different and feel reasonable. 
+
+```{r}
+set.seed(4678)
+food_fndds_major_minerals_perturb[[1]] |>
+  # select just the sodium and magnesium variables and rename them
+  select(description, 
+         sodium_perturbed = sodium,
+         magnesium_perturbed = magnesium) |>
+  # take a random sample of 10 food items
+  sample_n(10) |>
+  # add the original values to the dataset
+  left_join(select(food_fndds_log_scaled_major_minerals, 
+                   description, sodium, magnesium),
+            by = "description") %>%
+  select(description, sodium, sodium_perturbed, magnesium, magnesium_perturbed)
+```
+
+
+
+
+Nest, let's apply SVD to each perturbed dataset, and extract the variable loadings for each PC from each perturbed dataset.
+
+
+```{r}
+major_minerals_perturbed_data_loadings_df <- food_fndds_major_minerals_perturb |>
+  map_df(function(data_perturb) {
+    
+    # apply SVD to the perturbed dataset
+    pca_perturb <- data_perturb |>
+      select(-description) |>
+      as.matrix() |>
+      svd()
+    
+    # extract the loadings (matrix V)
+    loadings_perturb <- pca_perturb$v
+    rownames(loadings_perturb) <- colnames(data_perturb)[-1]
+    colnames(loadings_perturb) <- paste0("PC", 1:ncol(loadings_perturb))
+    
+    
+    # put results in data frame
+    loadings_perturb <- loadings_perturb |>
+      as.data.frame() |>
+      rownames_to_column("nutrient")
+    
+    return(loadings_perturb)
+  }, .id = "iter")
+major_minerals_perturbed_data_loadings_df
+```
+
+Then we can visualize the four perturbed loadings using a bar chart, and notice that they are almost identical for each variable, indicating that our principal components are very stable to these data perturbations.
+
+```{r}
+major_minerals_perturbed_data_loadings_df |>
+  ggplot() +
+  geom_col(aes(x = nutrient, y = -PC1, group = iter), 
+           position = "dodge", col = "white")
+```
+
+
+##### Stability to cleaning and pre-processing judgment calls
+
+Next, let's see if it makes a difference if we choose to center the variables. Note that for this particular perturbation, we feel that it makes more sense to keep the variables uncentered so that they (and the principal components) are interpreted relative to 0, rather than relative to the "average" data point (food item). But for curiosity's sake we will conduct a stability investigation anyway (and while we're at it we will also compare the log-transformed vs untransformed components too). 
+
+
+```{r}
+perturb_options <- expand_grid(center = c(TRUE, FALSE),
+                               log = c(TRUE, FALSE)) %>%
+  mutate(center_log_option = as.character(1:n()))
+
+
+food_fndds_major_minerals <- food_fndds %>%
+  select(description, sodium, potassium, calcium, 
+         phosphorus, magnesium, total_choline)
+# create a data frame consisting of all of the loadings for each nutrient 
+# group for each judgment call perturbation
+major_minerals_perturbed_jc_loadings_df <- map_df(1:nrow(perturb_options), function(i) {
+  # pre-process dataset using the current judgment call i
+  data_perturb <- preProcessFoodData(food_fndds_major_minerals,
+                                     .log_transform = perturb_options$log[i],
+                                     .center = perturb_options$center[i],
+                                     .scale = TRUE)
+  pca_perturb <- data_perturb |>
+    select(-description) |>
+    as.matrix() |>
+    svd()
+  
+  # extract the loadings (matrix V)
+  loadings_perturb <- pca_perturb$v
+  rownames(loadings_perturb) <- colnames(data_perturb)[-1]
+  colnames(loadings_perturb) <- paste0("PC", 1:ncol(loadings_perturb))
+  
+  # put results in data frame
+  loadings_perturb <- loadings_perturb |>
+    as.data.frame() |>
+    rownames_to_column("nutrient")
+  
+  return(loadings_perturb)
+}, .id = "center_log_option")
+
+major_minerals_perturbed_jc_loadings_df
+```
+
+
+Next, we can look at some bar charts of the loadings for each variables
+```{r}
+major_minerals_perturbed_jc_loadings_df |>
+  left_join(perturb_options, by = "center_log_option") |>
+  ggplot() +
+  geom_col(aes(x = nutrient, y = PC1, fill = center), 
+           position = "dodge", col = "white") +
+  facet_wrap(~paste("log: ", log), ncol = 1)
+```
+
+Notice that when we do not center the coefficients, the PC1 loadings are negative, but when we do, they are positive. Note, however that `PC1` and its negation `-PC1` are equivalent variables, so to make this comparison fair, let's look instead at the *absolute value* of the PC1 loadings. The loadings now look much more similar, but definitely less stable than for the data perturbations. Note that since the log-transformed loadings may not be comparable to the untransformed loadings, we are visualizing them in separate facet panels.
+
+
+```{r}
+major_minerals_perturbed_jc_loadings_df |>
+  left_join(perturb_options, by = "center_log_option") |>
+  ggplot() +
+  geom_col(aes(x = nutrient, y = abs(PC1), fill = center), 
+           position = "dodge", col = "white") +
+  facet_wrap(~paste("log: ", log), ncol = 1)
+```
+
+
+
+## PCA applied simultaneously to all nutrient groups {#sec-multi-pca}
+
+Let's now apply this same analysis to all of the other nutrient groups. In order to minimize repetitious code, the code below makes heavy use of functions and "nested" tibbles/data frames that will help us to automate applying the same analysis simultaneously to each of the different nutrient groups. The code in @sec-multi-pca is quite advanced, so if you prefer, you can just take the code above (for the major minerals nutrient group), and modify it so that it is just applied to each individual nutrient group separately.
+
+First, we wrote a function that will produce a list of dataset for each nutrient group. This function is helpful because it will be simple to apply this same split to each of the different datasets for predictability and stability analysis later on. 
+
+```{r}
+# A function for creating the separate nutrient group datasets
+createNutrientGroups <- function(.food_data) {
+  
+  food_fats <- .food_data |> 
+    select(contains(c("_acid", "fat", "cholesterol"))) 
+  
+  food_vitamins <- .food_data |>
+    select(beta_carotene, alpha_carotene, lutein_zeaxanthin, phylloquinone, vitamin_c, riboflavin, thiamine, folate, niacin, vitamin_b6, alpha_tocopherol, retinol, vitamin_b12, lycopene, cryptoxanthin)
+  
+  food_major_minerals <- .food_data |>
+    select(sodium, potassium, calcium, phosphorus, magnesium, total_choline)
+  
+  food_trace_minerals <- .food_data |>
+    select(iron, zinc, selenium, copper)
+  
+  food_carbs <- .food_data |>
+    select(total_dietary_fiber, carbohydrates)
+  
+  # return a tibble with list columns: each entry corresponds to one of the 
+  # nutrient datasets
+  return(tibble(nutrient_group = c("fats", "vitamins", "major_minerals", 
+                                   "trace_minerals", "carbs"),
+                data = list(food_fats, food_vitamins, food_major_minerals, 
+                            food_trace_minerals, food_carbs),
+                description = list(.food_data$description,
+                                   .food_data$description,
+                                   .food_data$description,
+                                   .food_data$description,
+                                   .food_data$description)))
+}
+```
+
+Then we can create a tibble, whose rows correspond to each nutrient-group dataset.
+
+```{r}
+#| label: create-nested-tibble
+
+# put all of the food sub-datasets into a list column for efficient computing
+food_grouped_fndds_log_scaled <- createNutrientGroups(food_fndds_log_scaled)
+food_grouped_fndds_log_scaled
+```
+
+To access one of the datasets, say the trace_minerals dataset, we can extract that entry of the tibble:
+
+```{r}
+food_grouped_fndds_log_scaled |>
+  filter(nutrient_group == "trace_minerals") |>
+  # pluck the first entry from the data column
+  pluck("data", 1)
+```
+
+
+
+Notice that we use `pluck()` instead of `select()`, because `select()` returns a *data frame*/*tibble* consisting of the named column(s), whereas `pluck()` returns the *contents* of the named columns (i.e., it plucks the contents from the tibble format).
+
+Then we can use a `mutate()` function to apply PCA via `svd()` to each of these datasets simultaneously. We will wrap this in a function so that we can re-use it for our downstream stability analysis.
+
+Note that you could do this with a for loop or a map function, but the objects you create gets messy quickly with these approaches unless you are very careful.
+
+Note that when you want to use `mutate()` to apply a function to a list column (such as `data`), you need to use a `map()` function.  
+
+```{r}
+food_grouped_fndds_log_scaled <- food_grouped_fndds_log_scaled |>
+  # rowwise lets us apply a function to each entry in a row separately
+  rowwise() |>
+  # apply PCA to each dataset and save it in a list-column called "pca"
+  mutate(pca = list(svd(data)))
+```
+
+This is what our object looks like now (it has a new `pca` column)
+
+```{r}
+food_grouped_fndds_log_scaled
+```
+
+
+Next, we can extract the loadings from each PCA object, and save them in their own list column.
+
+```{r}
+food_grouped_fndds_log_scaled <- food_grouped_fndds_log_scaled |>
+  # Note that rowwise should still be in effect.
+  # apply PCA to each dataset and save it in a list-column called "pca"
+  mutate(loadings = list(pca$v))
+
+food_grouped_fndds_log_scaled |>
+  filter(nutrient_group == "carbs") |>
+  pluck("loadings", 1)
+```
+
+
+We can also add a column consisting of the PCA transformed dataset for each nutrient group. This one looks a little more complicated, because we are using a `map2()` function and the function we are applying itself is a little more complicated.
+
+```{r}
+food_grouped_fndds_log_scaled <- food_grouped_fndds_log_scaled |>
+  mutate(pc_x = list(set_names(as_tibble(as.matrix(data) %*% loadings),
+                               paste0("PC", 1:ncol(loadings)))))
+```
+
+
+Our object now looks like
+
+```{r}
+food_grouped_fndds_log_scaled
+```
+
+
+And we can access the PC-transformed dataset for the trace minerals nutrient group using the following code
+
+```{r}
+food_grouped_fndds_log_scaled |>
+  filter(nutrient_group == "trace_minerals") |>
+  pluck("pc_x", 1) 
+```
+
+### Compute the proportion of variance explained
+
+Let's start using this object to do interesting things. Let's compute the vector of proportion of variance explained for each PC for each nutrient group as follows:
+
+
+```{r}
+computePropExplained <- function(.nutrient_group) {
+  pca_nutrient_group <- food_grouped_fndds_log_scaled |>
+    filter(nutrient_group == .nutrient_group) |>
+    pluck("pca", 1)
+  prop_var <- pca_nutrient_group$d^2 / sum(pca_nutrient_group$d^2)
+  return(prop_var)
+}
+```
+
+
+
+
+### Major minerals PCA
+
+Let's look at the *major minerals* sub-dataset (recall this is based on the *log-transformed*, scaled, uncentered dataset). First let's look at the proportion of variability explained by each of the PCs. 
+
+
+```{r}
+prop_var_major_minerals <- computePropExplained("major_minerals")
+prop_var_major_minerals
+```
+
+Since there are `r ncol(food_grouped_fndds_log_scaled$major_minerals)` columns in the major minerals dataset, there are 6 principal components. 
+
+In the table below, we see that the first PC explains `r 100 * round(prop_var_major_minerals[1], 2)`% of the variability in the major minerals data. 
+
+```{r}
+tibble(PC = 1:length(prop_var_major_minerals),
+       `Variability explained` = round(prop_var_major_minerals, 2),
+       `Cumulative variability explained` = round(cumsum(prop_var_major_minerals), 2))
+```
+
+The nutrient variable loadings are shown in the table below in decreasing order of loading magnitude (in absolute value).
+
+```{r}
+pc_loadings <- food_grouped_fndds_log_scaled |>
+  filter(nutrient_group == "major_minerals") |>
+  pluck("loadings", 1)
+major_mineral_nutrient_name <- food_grouped_fndds_log_scaled |>
+  filter(nutrient_group == "major_minerals") |>
+  pluck("data", 1) |>
+  colnames()
+
+tibble(nutrient = major_mineral_nutrient_name,
+       PC1_loading = pc_loadings[, 1]) |>
+  arrange(desc(abs(PC1_loading)))
+```
+
+Potassium is the nutrient with the largest weight on the first PC, but all variables have a reasonable loading/weight associated with them, indicating that the first major mineral PC contains a reasonable amount of information from all of the major mineral nutrients.
+
+Note that all of the weights are negative, which is a little bit counter-intuitive. A perfectly equivalent PC variable is the inverse version, where all of the values are negated. This is what we will use in our summaries.
+
+
+Since the first PC explains so much of the variability in the data, we won't use PC2, PC3 in our summary, but these later variables can still be very helpful for understanding the distribution of the foods in PC space.
+
+The figure below shows that the major minerals PC1 (and PC2) does a good job of separating the subset of foods that we see in a meaningful way. For instance, several seafood and fish food items seem to have very large PC1 (y-axis) measurements (indicating that they contain a lot of major minerals), and meat items such as beef and pork as well as dairy items such as milk and cheese also have fairly large values (but not quite as high as the fish items). 
+
+
+```{r}
+plotPc1Pc2 <- function(.food_grouped, 
+                       .nutrient_group, 
+                       .sample_n = NULL,
+                       .description_contains = NULL) {
+  
+  # extract the food names
+  description <- .food_grouped |>
+    filter(nutrient_group == .nutrient_group) |>
+    pluck("description", 1) 
+  
+  # extract the relevant dataset from the list column
+  x_df <- .food_grouped |>
+    filter(nutrient_group == .nutrient_group) |>
+    pluck("pc_x", 1) |>
+    mutate(description = description)
+  
+  # filter to the food items whose descriptions contains whatever character 
+  # string is provided in "description_contains"
+  if (!is.null(.description_contains)) {
+    x_filtered <- x_df |>
+      filter(str_detect(tolower(description), tolower(.description_contains)))
+  } else {
+    x_filtered <- x_df
+  }
+  
+  # create the plot
+  x_df |>
+    ggplot() +
+    geom_point(aes(x = PC2, y = -PC1), alpha = 0.3, color = "grey50") +
+    geom_text(aes(x = PC2, y = -PC1, label = str_trunc(description, 15)), 
+              check_overlap = TRUE, hjust = 0, data = x_filtered)  +
+    ggtitle(.nutrient_group)
+}
+
+```
+
+```{r}
+#| label: fig-major-minerals-pc12
+#| fig-cap: "A scatterplot of PC1 vs PC2 for the major mineral nutrients."
+#| fig-width: 8
+#| fig-height: 8
+plotPc1Pc2(food_grouped_fndds_log_scaled,
+           "major_minerals")
+```
+
+
+### Vitamins PCA
+
+
+
+```{r}
+prop_var_vitamins <- computePropExplained("vitamins")
+prop_var_vitamins
+
+```
+
+Since there are `r ncol(food_grouped_fndds_log_scaled$vitamins)` columns in the vitamins dataset, there are `r ncol(food_grouped_fndds_log_scaled$vitamins)` principal components. 
+
+In the table below (the variability explained by the first 5 PCs), we see that the first PC explains `r 100 * round(prop_var_vitamins[1], 2)`% of the variability in the vitamins data. The first two variables explain `r round(100 * prop_var_vitamins[1] + 100 * prop_var_vitamins[2])`%.
+
+```{r}
+tibble(PC = 1:length(prop_var_vitamins),
+       `Variability explained` = round(prop_var_vitamins, 2),
+       `Cumulative variability explained` = round(cumsum(prop_var_vitamins), 2)) |>
+  head(5)
+```
+
+The nutrient variable loadings are shown in the table below in decreasing order of loading magnitude (in absolute value).
+
+
+```{r}
+pc_loadings <- food_grouped_fndds_log_scaled |>
+  filter(nutrient_group == "vitamins") |>
+  pluck("loadings", 1)
+vitamins_nutrient_name <- food_grouped_fndds_log_scaled |>
+  filter(nutrient_group == "vitamins") |>
+  pluck("data", 1) |>
+  colnames()
+
+tibble(nutrient = vitamins_nutrient_name,
+       PC1_loading = pc_loadings[, 1]) |>
+  arrange(desc(abs(PC1_loading)))
+```
+
+Folic acid is the nutrient with the largest weight on the first PC. Note that all of the weights are negative again, so we will negate the values of this PC in our summaries and downstream analyses.
+
+The figure below shows that the vitamin PC1 (and PC2) also does a good job of separating the subset of foods that we see in a meaningful way. The foods with the highest values for vitamins seem to mostly be cereals, followed by liver meats.
+
+```{r}
+#| label: fig-vitamins-pc12
+#| fig-cap: "A scatterplot of PC1 vs PC2 for the vitamins nutrients."
+#| fig-width: 8
+#| fig-height: 8
+plotPc1Pc2(food_grouped_fndds_log_scaled, "vitamins")
+```
+
+
+
+
+### Fats PCA
+
+
+
+```{r}
+prop_var_fats <- computePropExplained("fats")
+prop_var_fats
+```
+
+Since there are `r ncol(food_grouped_fndds_log_scaled$fats)` columns in the fats dataset, there are `r ncol(food_grouped_fndds_log_scaled$fats)` principal components. In the table below
+
+In the table below (the variability explained by the first 5 PCs), we see that the first PC explains `r 100 * round(prop_var_fats[1], 2)`% of the variability in the fats data. The first two variables explain `r round(100 * prop_var_fats[1] + 100 * prop_var_fats[2])`%.
+
+```{r}
+tibble(PC = 1:length(prop_var_fats),
+       `Variability explained` = round(prop_var_fats, 2),
+       `Cumulative variability explained` = round(cumsum(prop_var_fats), 2)) |>
+  head(5)
+```
+
+The nutrient variable loadings are shown in the table below in decreasing order of loading magnitude (in absolute value).
+
+
+```{r}
+pc_loadings <- food_grouped_fndds_log_scaled |>
+  filter(nutrient_group == "fats") |>
+  pluck("loadings", 1)
+fats_nutrient_name <- food_grouped_fndds_log_scaled |>
+  filter(nutrient_group == "fats") |>
+  pluck("data", 1) |>
+  colnames()
+
+tibble(nutrient = fats_nutrient_name,
+       PC1_loading = pc_loadings[, 1]) |>
+  arrange(desc(abs(PC1_loading)))
+```
+
+
+"Fat" is the nutrient with the largest weight on the first PC, followed by saturated and then monounsaturated fat. Note that all of the weights are negative again, so we will negate the values of this PC in our summaries and downstream analyses.
+
+The figure below shows that the fat PC1 (and PC2) also does a good job of separating the subset of foods that we see in a meaningful way. The foods with the highest values for fats seem to mostly be ghee, butter, etc (which is unsurprising). 
+
+```{r}
+#| label: fig-fats-pc12
+#| fig-cap: "A scatterplot of PC1 vs PC2 for the fats nutrients."
+#| fig-width: 8
+#| fig-height: 8
+plotPc1Pc2(food_grouped_fndds_log_scaled, "fats")
+```
+
+PC2 seems to be picking up on fish-specific fats (likely "healthy fatty acids"). We may want to consider using this variable in our summaries, but for now we will keep it simple and stick with PC1 only (one avenue of analysis might be to identify which fat nutrients are being captured by PC2 and creating an entirely new nutrient group from them). 
+
+Notice that many milk products seem to have very low fat content, which is quite surprising. Closer inspection, however, shows that this is mostly fat free milk or "NS [not sure] as to fat content" (which were likely fat free or low fat).
+
+```{r}
+set.seed(4662)
+food_grouped_fndds_log_scaled |> 
+  filter(nutrient_group == "fats") |>
+  # extract PC transformed data for fats nutrient group
+  pluck("pc_x", 1) |> 
+  # add a description column
+  mutate(description = food_fndds$description) |>
+  # filter to milk products with fat PC variable < 3
+  filter(abs(PC1) < 3, 
+         str_detect(description, "Milk")) |>
+  select(description) |>
+  sample_n(10)
+```
+
+
+### Trace minerals PCA
+
+
+```{r}
+prop_var_trace_minerals <- computePropExplained("trace_minerals")
+prop_var_trace_minerals
+```
+
+Since there are `r ncol(food_grouped_fndds_log_scaled$trace_minerals)` columns in the trace minerals dataset, there are `r ncol(food_grouped_fndds_log_scaled$trace_minerals)` principal components.
+
+In the table below (the variability explained by the first 5 PCs), we see that the first PC explains `r 100 * round(prop_var_trace_minerals[1], 2)`% of the variability in the trace minerals data. The first two variables explain `r round(100 * prop_var_trace_minerals[1] + 100 * prop_var_trace_minerals[2])`%.
+
+```{r}
+tibble(PC = 1:length(prop_var_trace_minerals),
+       `Variability explained` = round(prop_var_trace_minerals, 2),
+       `Cumulative variability explained` = round(cumsum(prop_var_trace_minerals), 2)) |>
+  head(5)
+```
+
+The nutrient variable loadings are shown in the table below in decreasing order of loading magnitude (in absolute value).
+
+```{r}
+pc_loadings <- food_grouped_fndds_log_scaled |>
+  filter(nutrient_group == "trace_minerals") |>
+  pluck("loadings", 1)
+trace_minerals_nutrient_name <- food_grouped_fndds_log_scaled |>
+  filter(nutrient_group == "trace_minerals") |>
+  pluck("data", 1) |>
+  colnames()
+
+tibble(nutrient = trace_minerals_nutrient_name,
+       PC1_loading = pc_loadings[, 1]) |>
+  arrange(desc(abs(PC1_loading)))
+```
+
+"Selenium" is the nutrient with the largest weight on the first PC, followed by iron and zinc, with copper having lower weight. Note that all of the weights are negative again, so we will negate the values of this PC in our summaries and downstream analyses.
+
+The figure below shows that the fat PC1 (and PC2) also does a good job of separating the subset of foods that we see in a meaningful way. The foods with the highest values for trace minerals seem to mostly be oysters and liver meats, followed by some cereals. 
+
+```{r}
+#| label: fig-trace-minerals-pc12
+#| fig-cap: "A scatterplot of PC1 vs PC2 for the trace minerals nutrients."
+#| fig-width: 8
+#| fig-height: 8
+plotPc1Pc2(food_grouped_fndds_log_scaled, "trace_minerals")
+```
+
+
+### Carbohydrates PCA 
+
+
+
+```{r}
+prop_var_carbs <- computePropExplained("carbs")
+prop_var_carbs
+```
+
+
+Since there are `r ncol(food_grouped_fndds_log_scaled$carbs)` columns in the carbohydrates dataset, there are `r ncol(food_grouped_fndds_log_scaled$carbs)` principal components. In the table below
+
+In the table below (the variability explained by the first 5 PCs), we see that the first PC explains `r 100 * round(prop_var_carbs[1], 2)`% of the variability in the carbohydrates data. The first two variables explain `r round(100 * prop_var_carbs[1] + 100 * prop_var_carbs[2])`%.
+
+```{r}
+tibble(PC = 1:length(prop_var_carbs),
+       `Variability explained` = round(prop_var_carbs, 2),
+       `Cumulative variability explained` = round(cumsum(prop_var_carbs), 2)) |>
+  head(5)
+```
+
+The nutrient variable loadings are shown in the table below in decreasing order of loading magnitude (in absolute value).
+
+
+
+```{r}
+pc_loadings <- food_grouped_fndds_log_scaled |>
+  filter(nutrient_group == "carbs") |>
+  pluck("loadings", 1)
+carbs_nutrient_name <- food_grouped_fndds_log_scaled |>
+  filter(nutrient_group == "carbs") |>
+  pluck("data", 1) |>
+  colnames()
+
+tibble(nutrient = carbs_nutrient_name,
+       PC1_loading = pc_loadings[, 1]) |>
+  arrange(desc(abs(PC1_loading)))
+```
+
+"carbohydrates" is the nutrient with the largest weight on the first PC, with total dietary fiber having a lesser weight. Note that all of the weights are negative again, so we will negate the values of this PC in our summaries and downstream analyses.
+
+The figure below shows that the fat PC1 (and PC2) also does a good job of separating the subset of foods that we see in a meaningful way. The foods with the highest values for carbohydrates seem to mostly be oysters and liver meats, followed by some cereals. 
+
+```{r}
+#| label: fig-carbs-pc12
+#| fig-cap: "A scatterplot of PC1 vs PC2 for the carbs nutrients."
+#| fig-width: 8
+#| fig-height: 8
+plotPc1Pc2(food_grouped_fndds_log_scaled, "carbs")
+```
+
+
+
+## PCS analysis
+
+Next, we want to evaluate our results using the principles of PCS. Specifically, we want to show that they are predictable (that they re-emerge in external data, namely the "legacy" dataset), and that they are stable to data perturbations and the judgment calls that we made throughout the DSLC so far.
+
+
+### Predictability
+
+To show that our results are predictable, we will reproduce our analysis on the alternative legacy dataset which is acting as an external validation set. 
+
+The fact that we wrote re-usable functions above makes it relatively straightforward to apply the same analysis to a new dataset.
+
+```{r}
+food_grouped_legacy_log_scaled <- createNutrientGroups(food_legacy_log_scaled)
+
+# create the list columns
+food_grouped_legacy_log_scaled <- food_grouped_legacy_log_scaled |>
+  rowwise() |>
+  # apply PCA to each dataset and save it in a list-column called "pca"
+  mutate(pca = list(svd(data))) |>
+  # extract loadings from pca column
+  mutate(loadings = list(pca$v)) |>
+  # compute PC transformed data
+  mutate(pc_x = list(set_names(as_tibble(as.matrix(data) %*% loadings),
+                               paste0("PC", 1:ncol(loadings)))))
+```
+
+
+Our legacy food object now looks like the original fndds one, with each of the same list columns (except computed from the legacy data). 
+
+```{r}
+food_grouped_legacy_log_scaled
+```
+
+@fig-major-minerals-pc12-legacy shows the -PC1 vs PC2 plot for the Major minerals data (the equivalent of @fig-major-minerals-pc12). We specifically filtered to just show the "pork" food items to make comparisons easier (feel free to play with this and look at other food items). 
+
+To our eyes, especially for the fats and trace minerals nutrient groups, it seems like the plot is showing much the same trends for each dataset, which provides us with some fairly solid evidence that the patterns picked up by the PCA algorithm are predictable. Less so for the major minerals dataset though.
+
+```{r}
+#| label: fig-major-minerals-pc12-legacy
+#| fig-cap: "A scatterplot of PC1 vs PC2 for the major mineral nutrients based on the legacy validation data."
+#| fig-width: 8
+#| fig-height: 12
+
+
+(plotPc1Pc2(food_grouped_fndds_log_scaled, "major_minerals", .description_contains = "pork,") + 
+   plotPc1Pc2(food_grouped_legacy_log_scaled, "major_minerals", .description_contains = "pork,")) / 
+  (plotPc1Pc2(food_grouped_fndds_log_scaled, "vitamins", .description_contains = "pork,") + 
+     plotPc1Pc2(food_grouped_legacy_log_scaled, "vitamins", .description_contains = "pork,")) / 
+  (plotPc1Pc2(food_grouped_fndds_log_scaled, "fats", .description_contains = "pork,") + 
+     plotPc1Pc2(food_grouped_legacy_log_scaled, "fats", .description_contains = "pork,")) / 
+  (plotPc1Pc2(food_grouped_fndds_log_scaled, "trace_minerals", .description_contains = "pork,") + 
+     plotPc1Pc2(food_grouped_legacy_log_scaled, "trace_minerals", .description_contains = "pork,"))
+```
+
+@fig-hist-fndds-legacy shows histograms of the PC1 variable for each of the two major minerals datasets (FNDDS and legacy). The overall PC1 shape is similar for each nutrient group, except for the major minerals, where the legacy PC1 values are generally higher and less variable (the peak is skinnier) than the FNDDS PC1 values.
+
+```{r}
+#| label: fig-hist-fndds-legacy
+#| fig-cap: "Histograms of the major minerals PC1 distribution for the FNDDS and legacy datasets."
+
+plotPc1Histograms <- function(.nutrient_group) {
+  fndds_pc1 <- food_grouped_fndds_log_scaled |> 
+    filter(nutrient_group == .nutrient_group) |>
+    pluck("pc_x", 1) |>
+    select(PC1) |>
+    mutate(dataset = "fndds")
+  legacy_pc1 <- food_grouped_legacy_log_scaled |> 
+    filter(nutrient_group == .nutrient_group) |>
+    pluck("pc_x", 1) |>
+    select(PC1) |>
+    mutate(dataset = "legacy")
+  
+  rbind(fndds_pc1, legacy_pc1) |> ggplot() +
+    geom_histogram(aes(x = PC1, y = ..density.., fill = dataset), 
+                   position = "identity", col = "white", 
+                   alpha = 0.5, bins = 30) +
+    ggtitle(.nutrient_group)
+}
+
+# piece the plots together using the patchwork library
+(plotPc1Histograms("fats") + plotPc1Histograms("vitamins")) / 
+  (plotPc1Histograms("major_minerals") + plotPc1Histograms("trace_minerals"))
+```
+
+
+
+
+@fig-qq-fndds-legacy shows the same information but using a QQ-plot to compare the FNDDS and legacy PC1 distributions for the major minerals dataset. Overall, the distributions seem fairly similar (they approximately follow a straight diagonal line), except that they don't seem to have the same magnitude (the points lie above the identity diagonal line).
+
+```{r}
+#| label: fig-qq-fndds-legacy
+#| fig-cap: "A QQ plot comparing the major minerals PC1 distribution for the FNDDS and legacy datasets. The identity diagonal line is shown as a solid line."
+
+plotPc1QQ <- function(.nutrient_group) {
+  fndds_pc1 <- food_grouped_fndds_log_scaled |> 
+    filter(nutrient_group == .nutrient_group) |>
+    pluck("pc_x", 1) |>
+    pull(PC1)
+  
+  legacy_pc1 <- food_grouped_legacy_log_scaled |> 
+    filter(nutrient_group == .nutrient_group) |>
+    pluck("pc_x", 1) |>
+    pull(PC1)
+  
+  
+  
+  
+  data.frame(fndds_pc1_q = quantile(fndds_pc1, seq(0, 1, 0.01)),
+             legacy_pc1_q = quantile(legacy_pc1, seq(0, 1, 0.01))) |>
+    ggplot() +
+    geom_point(aes(x = fndds_pc1_q, y = legacy_pc1_q), alpha = 0.7) +
+    geom_abline(intercept = 0, slope = 1)  
+}
+
+# piece the plots together using the patchwork library
+(plotPc1QQ("fats") + plotPc1QQ("vitamins")) / 
+  (plotPc1QQ("major_minerals") + plotPc1QQ("trace_minerals"))
+```
+
+
+### Stability to data perturbations
+
+We will investigate two types of data perturbations below:
+
+1. Bootstrap: to represent the fact that different food items may have been included in the observed data
+
+1. Adding random noise: to represent inaccuracies in the nutrient measurements.
+
+
+
+We will re-compute the principal components using 4 different versions of the training data, each of which involves a bootstrap sample of the original food items, and each of which has been modified by adding a small amount of "noise" where we add random numbers whose magnitude is up to around 20% of the observed measurement. Since our data has been scaled to have standard deviation 1, we roughly approximate such noise using random numbers drawn from a Gaussian distribution that has mean 0 and standard deviation of 0.2 multiplied by the mean of each column (to represent an error of 20%). For any resulting perturbed values that ended up being negative, we rounded them up to 0.
+
+To investigate the plausibility of this perturbation, @fig-perturb-hist below shows some histograms that compares the distribution of the original measurements and the perturbed measurements for three nutrient variables for an example perturbed dataset. Overall the distributions are similar, which indicates that this perturbation is reasonably plausible.
+
+```{r}
+#| label: fig-perturb-hist
+#| fig-cap: "Histograms comparing the original and perturbed distributions for three nutrient variables"
+set.seed(28464)
+
+# create a perturbed version of the food dataset
+perturb_ex <- food_fndds_log_scaled |>
+  # add random noise to each observation (noise is equal to 0 on average)
+  mutate(across(where(is.numeric), 
+                function(x) x + rnorm(n(), 0, 0.2 * mean(x))))  |>
+  # if any observations are negative, round them up to 0
+  mutate(across(where(is.numeric), 
+                function(x) if_else(x < 0, true = 0, false = x)))
+
+# compare the distribution of the original and the perturbed nutrient values
+examinePerturbed <- function(nutrient_col) {
+  rbind(data.frame(source = "original",
+                   value = food_fndds_log_scaled[[nutrient_col]]),
+        data.frame(source = "perturbed",
+                   value = perturb_ex[[nutrient_col]])) |>
+    ggplot() + 
+    geom_histogram(aes(x = value, y = ..density.., fill = source),
+                   position = "identity", alpha = 0.6, bins = 30) +
+    ggtitle(nutrient_col)
+}
+
+# arrange the plots in rows using patchwork
+examinePerturbed("fat") / examinePerturbed("beta_carotene") / examinePerturbed("zinc")
+```
+
+
+Let's create four different versions of the perturbed data and visually compare the PCA results. To compare the results, let's just look at whether the loadings change for each dataset. The following code relies heavily on `map()` functions, but you could certainty manually create four perturbed versions of the data and run the analysis on each of them. 
+
+
+
+```{r}
+# map_df(1:4, ....) means map through the following function 4 times and save 
+# the results in a dataframe
+perturb_data_loadings_df <- map_df(1:4, function(i) {
+  # create a perturbed version of each nutrient group dataset
+  food_grouped_perturbed <- food_grouped_fndds_log_scaled |>
+    select(nutrient_group, data) |>
+    # undo rowwise
+    ungroup() |>
+    # add a data perturbed list column, consisting of a perturbed version of 
+    # the original data for each nutrient group
+    mutate(data_perturbed = map(data, function(.df)  {
+      .df |>
+        # add random noise to each observation (noise is equal to 0 on average)
+        mutate(across(where(is.numeric), 
+                      function(x) x + rnorm(n(), 0, 0.2 * mean(x))))  |>
+        # if any observations are negative, round them up to 0
+        mutate(across(where(is.numeric), 
+                      function(x) if_else(x < 0, true = 0, false = x))) |>
+        sample_frac(1, replace = TRUE) 
+    }))
+  
+  # apply PCA to each perturbed dataset
+  food_grouped_perturbed <- food_grouped_perturbed |>
+    rowwise() |>
+    mutate(pca_perturbed = list(svd(data_perturbed))) |>
+    transmute(loadings_perturbed = list(tibble(nutrient_group = nutrient_group, 
+                                               nutrient_variable = colnames(data),
+                                               pc1_loading = pca_perturbed$v[, 1]))) |>
+    unnest(loadings_perturbed)
+}, .id = "iter")
+```
+
+The following plot shows a bar representing each of the 4 perturbed loading values for the major minerals nutrient variables. They are virtually (but not *exactly*) identical.
+
+```{r}
+perturb_data_loadings_df |>
+  filter(nutrient_group == "fats") |>
+  ggplot() + 
+  geom_col(aes(x = nutrient_variable, y = pc1_loading, group = iter), 
+           position = "dodge", col = "white") 
+```
+
+
+
+```{r}
+perturb_data_loadings_df |>
+  filter(nutrient_group == "vitamins") |>
+  ggplot() + 
+  geom_col(aes(x = nutrient_variable, y = pc1_loading, group = iter), 
+           position = "dodge", col = "white") 
+```
+
+
+```{r}
+perturb_data_loadings_df |>
+  filter(nutrient_group == "major_minerals") |>
+  ggplot() + 
+  geom_col(aes(x = nutrient_variable, y = pc1_loading, group = iter), 
+           position = "dodge", col = "white") 
+```
+
+
+```{r}
+perturb_data_loadings_df |>
+  filter(nutrient_group == "trace_minerals") |>
+  ggplot() + 
+  geom_col(aes(x = nutrient_variable, y = pc1_loading, group = iter), 
+           position = "dodge", col = "white") 
+```
+
+Since the loadings are very stable, this means that all of the downstream results (such as the plots, etc) will also be very stable to the data perturbations. 
+
+### Stability to judgment call perturbations
+
+Let's repeat our analyses using alternative data cleaning judgment calls. We will focus here on the pre-processing judgment call options to log-transform and center the data. 
+
+```{r}
+perturb_options <- expand_grid(center = c(TRUE, FALSE),
+                               log = c(TRUE, FALSE)) |>
+  mutate(perturbation_id = as.character(1:n())) |>
+  mutate(perturbation = case_when(center & log ~ "log, center",
+                                  center & !log ~ "center",
+                                  !center & log ~ "log",
+                                  !center & !log ~ "none"))
+
+
+# create a data frame consisting of all of the loadings for each nutrient 
+# group for each judgment call perturbation
+perturbed_jc_loadings_df <- map_df(1:nrow(perturb_options), function(i) {
+  # pre-process dataset using the current judgment call i
+  food_preprocessed <- preProcessFoodData(food_fndds,
+                                          .log_transform = perturb_options$log[i],
+                                          .center = perturb_options$center[i],
+                                          .scale = TRUE)
+  
+  # create the tibble with the nutrient group data list columns
+  food_grouped_jc <- createNutrientGroups(food_preprocessed)
+  
+  # create the list columns
+  food_grouped_jc <- food_grouped_jc |>
+    rowwise() |>
+    # apply PCA to each dataset and save it in a list-column called "pca"
+    mutate(pca = list(svd(data))) |>
+    # compute the loadings for each nutrient group
+    transmute(loadings = list(data.frame(nutrient_group = nutrient_group, 
+                                         nutrient_variable = colnames(data),
+                                         pc1_loading = pca$v[, 1]))) |> 
+    unnest(loadings)
+  return(food_grouped_jc)
+}, .id = "perturbation_id")
+
+# look at the tibble we created
+perturbed_jc_loadings_df
+```
+
+
+Let's look at how the loadings change across the four different pre-processing perturbations. 
+
+```{r}
+perturbed_jc_loadings_df |>
+  left_join(select(perturb_options, perturbation_id, perturbation), 
+            by = "perturbation_id") |>
+  filter(nutrient_group == "fats") |>
+  # force the nutrients to be in decreasing order of loading
+  group_by(nutrient_variable) |>
+  mutate(avg_pc1_loading = mean(abs(pc1_loading))) |>
+  ungroup() |>
+  arrange(abs(avg_pc1_loading)) |>
+  mutate(nutrient_variable = fct_inorder(nutrient_variable)) |>
+  # create plot
+  ggplot() +
+  geom_point(aes(x = pc1_loading, y = nutrient_variable, color = perturbation)) 
+```
+
+Interestingly, it looks as though the loadings from the center and log,center perturbations are the approximate negatives of perturbations log and none. Let's try this again, but with the absolute value of the loadings:
+
+
+```{r}
+perturbed_jc_loadings_df |>
+  left_join(select(perturb_options, perturbation_id, perturbation), 
+            by = "perturbation_id") |>
+  filter(nutrient_group == "fats") |>
+  # force the nutrients to be in decreasing order of loading
+  group_by(nutrient_variable) |>
+  mutate(avg_pc1_loading = mean(abs(pc1_loading))) |>
+  ungroup() |>
+  arrange(abs(avg_pc1_loading)) |>
+  mutate(nutrient_variable = fct_inorder(nutrient_variable)) |>
+  # create plot
+  ggplot() +
+  geom_point(aes(x = abs(pc1_loading), y = nutrient_variable, color = perturbation)) 
+```
+
+
+It looks as though the overall loadings trends are fairly stable across the different judgment call perturbations, which is great. Let's look at this for the other nutrient groups
+
+```{r}
+plotPerturbedLoadings <- function(.nutrient_group) {
+  perturbed_jc_loadings_df |>
+    left_join(select(perturb_options, perturbation_id, perturbation), 
+              by = "perturbation_id") |>
+    filter(nutrient_group == .nutrient_group) |>
+    # force the nutrients to be in decreasing order of loading
+    group_by(nutrient_variable) |>
+    mutate(avg_pc1_loading = mean(abs(pc1_loading))) |>
+    ungroup() |>
+    arrange(abs(avg_pc1_loading)) |>
+    mutate(nutrient_variable = fct_inorder(nutrient_variable)) |>
+    # create plot
+    ggplot() +
+    geom_point(aes(x = abs(pc1_loading), y = nutrient_variable, color = perturbation))  +
+    theme(panel.grid.major.y = element_line(color = "grey80"))  +
+    ggtitle(.nutrient_group)
+}
+
+
+(plotPerturbedLoadings("fats") + plotPerturbedLoadings("major_minerals")) / 
+  (plotPerturbedLoadings("trace_minerals") + plotPerturbedLoadings("vitamins"))
+
+```
+
+Overall, the loadings trends seem fairly stable, at least in terms of rankings (i.e. which nutrients are considered most important for computing the principal component). But there are clearly some differences between these techniques. 
+
+
+If we have to choose just one, which one should we choose? Let's compare the distributions of the resulting principal components. 
+
+
+```{r}
+
+perturbed_pc1 <- map_df(1:nrow(perturb_options), function(i) {
+  # pre-process dataset
+  food_preprocessed <- preProcessFoodData(food_fndds,
+                                          .log_transform = perturb_options$log[i],
+                                          .center = perturb_options$center[i],
+                                          .scale = TRUE)
+  
+  # create the tibble with the nutrient group data list columns
+  food_grouped_perturbed <- createNutrientGroups(food_preprocessed)
+  
+  # create the list columns
+  food_grouped_perturbed <- food_grouped_perturbed |>
+    rowwise() |>
+    # apply PCA to each dataset and save it in a list-column called "pca"
+    mutate(pca = list(svd(data))) |>
+    mutate(loadings = list(pca$v)) |> 
+    mutate(pc_x = list(set_names(as_tibble(as.matrix(data) %*% loadings),
+                                 paste0("PC", 1:ncol(loadings))))) |>
+    transmute(pc1 = list(tibble(nutrient_group = nutrient_group,
+                                description = description,
+                                PC1 = pc_x$PC1))) |>
+    unnest(pc1)
+  return(food_grouped_perturbed)
+}, .id = "perturbation_id")
+```
+
+Based on the figure below, which shows histograms of the perturbed PC1 distribution for each of the four nutrient groups we have been exploring for each of the four pre-processing judgment call combinations, it appears that the log-transformation judgment call is the one that has the most impact on the results, especially for the major minerals and vitamins nutrient groups. Specifically when we log-transform the data, the principal components seem to a less skewed distribution (the blank space in several of the plots implies that there are some extreme values present). But whether or not this is preferable is unclear. 
+
+```{r}
+#| warning: false
+#| message: false
+#| fig-height: 12
+plotPerturbedPc1 <- function(.nutrient_group) {
+  perturbed_pc1 |> 
+    left_join(select(perturb_options, perturbation_id, perturbation), 
+              by = "perturbation_id") |>
+    filter(nutrient_group == .nutrient_group) |>
+    ggplot() +
+    geom_histogram(aes(x = PC1, y = ..density..), col = "white") +
+    facet_wrap(~perturbation, scale = "free") +
+    ggtitle(.nutrient_group)
+}
+
+
+(plotPerturbedPc1("fats") + plotPerturbedPc1("major_minerals")) / 
+  (plotPerturbedPc1("trace_minerals") + plotPerturbedPc1("vitamins"))
+```
+
+
+## Creating the "final" PCA-based summary dataset
+
+In a situation such as this, where there are differences in the results, but it is not clear which set of judgment calls is the "best", we recommend asking a domain professional which result (in this case, which PC-based summary variables) seems most sensible to them. 
+
+However, in the absence of a domain professional, we will choose the version that makes most sense for our downstream application. Since we want a measurement of 0 to actually correspond to an absence of that particular type of nutrient, it probably makes sense to use one of the non-centered dataset which yields summary variables with negative and positive values. Since the log-transformed PC variables seem to have values that are more spread out, we will go with the log-transformed dataset but we will need to negate each of the PC-derived variables so that the resulting values are positive (i.e., by multiplying each PC variable by -1).
+
+
+
+```{r}
+food_grouped_final <- createNutrientGroups(food_fndds_log_scaled)
+
+# create the list columns, and conduct the PCA analysis to create the PC 
+# transformed columns
+food_grouped_final <- food_grouped_final |>
+  rowwise() |>
+  # apply PCA to each dataset and save it in a list-column called "pca"
+  mutate(pca = list(svd(data))) |>
+  # extract loadings from pca column
+  mutate(loadings = list(pca$v)) |>
+  # compute PC transformed data
+  mutate(pc_x = list(set_names(as_tibble(as.matrix(data) %*% loadings),
+                               paste0("PC", 1:ncol(loadings)))))
+ 
+
+# create a simple data frame consisting of the PC1 transformed variable for each nutrient group
+food_pc_final <- food_grouped_final |>
+  rowwise() |>
+  transmute(final_data = list(tibble(nutrient_group = nutrient_group,
+                                     description = description,
+                                     PC1 = -pc_x$PC1))) |>
+  unnest(final_data) |>
+  pivot_wider(names_from = "nutrient_group", values_from = "PC1") |>
+  # add the protein and calories variables 
+  # (scaled, but not log-transformed or centered)
+  mutate(protein = food_fndds$protein / sd(food_fndds$protein),
+         calories = food_fndds$calories / sd(food_fndds$protein)) |>
+  # make it explicit which variables are based on PCs
+  rename(fats_pc1 = fats,
+         vitamins_pc1 = vitamins,
+         major_minerals_pc1 = major_minerals,
+         trace_minerals_pc1 = trace_minerals,
+         carbs_pc1 = carbs)
+
+```
+
+
+```{r}
+set.seed(287643)
+food_pc_final |> 
+  mutate(description = str_trunc(description, 25)) |>
+  mutate(across(where(is.numeric), ~round(., 2))) |>
+  sample_n(10)
+```
+
+If desired to simplify interpretation, we can convert each of these summary nutrient variables into a categorical "very low", "low", "high", "very high", etc by specifying cutoffs for each category.
+
+```{r}
+quantile_cutoffs <- food_pc_final |>
+  pivot_longer(2:ncol(food_pc_final), 
+               names_to = "nutrient_group", values_to = "amount") |>
+  group_by(nutrient_group) |>
+  summarise(q25 = quantile(amount, 0.25),
+            q50 = quantile(amount, 0.5),
+            q75 = quantile(amount, 0.75)) 
+```
+
+
+The following code defines a crude function for summarizing food items in terms of these summary nutrients using the 0.25, 0.5, and 0.75 quantiles as cutoffs.
+
+```{r}
+
+nutritionSummary <- function(.food_item) {
+  food_pc_final |>
+    mutate_if(is.numeric, function(.var) {
+      case_when(.var > quantile(.var, 0.75) ~ "very high",
+                .var > quantile(.var, 0.5) & .var <= quantile(.var, 0.75) ~ "high",
+                .var > quantile(.var, 0.25) & .var <= quantile(.var, 0.5) ~ "low",
+                .var <= quantile(.var, 0.25) ~ "very low")
+    }) |>
+    filter(description == .food_item)
+  
+}
+
+```
+
+Let's look at the nutrition summary for Nachos with cheese and sour cream
+
+```{r}
+nutritionSummary("Nachos with cheese and sour cream")
+```
+
+Boiled potatoes:
+
+```{r}
+nutritionSummary("Potato, boiled, from fresh, peel not eaten, made with margarine")
+```
+
+
+A pasta dish:
+
+```{r}
+nutritionSummary("Pasta, whole grain, with tomato-based sauce and added vegetables, ready-to-heat")
+```
+
+
+As an exercise, create a visualization that would give you a sense of how an individual food item of your choice fares in each nutrient category, i.e., how "nutritionally balanced" your selected food item is.
+

@@ -1,0 +1,1314 @@
+---
+title: "[Chapter 7] Clustering the nutrition data"
+subtitle: "[DSLC stages]: Analysis"
+format: 
+  html:
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+In this document, we will conduct a cluster analysis on the food nutrition data. Recall that our goal is to come up with some meaningful food groups that will help us organize the food items into categories for the user of our hypothetical nutrition app. E.g., if a user wanted to look up an item, they could click on the "meats" category or the "dessert" category to filter to the food item they are searching for.
+
+
+Since we ended up using the *scaled* (i.e. each variable has been divided by its standard deviation), but *uncentered* FNDDS dataset (we did not subtract the mean from each variable before dividing by the standard deviation) where we have applied a *log-transformation* to each variable, we will continue to use this version of the dataset here. We will later explore the stability of our results to see how these pre-processing judgment calls impacted our cluster findings (although note that the judgment call to not mean-center should not have any impact on our clustering results).
+
+The following code gets sets up the libraries and cleaned and pre-processed data that we will use in this document.
+
+```{r}
+#| message: false
+#| warning: false
+
+# note that if you load these libraries in the wrong order, the tidyverse 
+# function map() will not work
+library(Rfast)
+library(patchwork)
+library(cluster)
+library(mclust)
+library(shadowtext)
+library(furrr)
+library(fossil)
+library(tidyverse)
+
+# source the cleaning function code
+source("functions/cleanFoodData.R")
+source("functions/preProcessFoodData.R")
+# load in all of the raw data objects
+nutrient_amount <- read_csv("../data/food_nutrient.csv")
+food_name <- read_csv("../data/food.csv")
+nutrient_name <- read_csv("../data/nutrient_name.csv")
+
+# this fndds data is the "training" data that we will use for our explorations.
+food_fndds <- cleanFoodData(nutrient_amount,
+                            food_name,
+                            nutrient_name, 
+                            # fndds is the default value so this argument is optional:
+                            .select_data_type = "survey_fndds_food")
+food_fndds_log_scaled <- preProcessFoodData(food_fndds, 
+                                            .log_transform = TRUE, 
+                                            .center = FALSE, 
+                                            .scale = TRUE, 
+                                            .remove_fat = FALSE)
+# create a version of the dataset without the food descriptions
+food_fndds_log_scaled_numeric <- food_fndds_log_scaled |>
+  select(-description)
+
+# create a vector consisting of the food descriptions prior to the first comma
+truncateDescription <- function(.description, length = c("first phrase", "first word")) {
+  length <- match.arg(length)
+  description <- map_chr(.description, 
+                         ~str_split(., ",", simplify = TRUE)[1]) |>
+    str_replace_all(pattern = ",", replacement = "") 
+  if (length == "first word") {
+    description <- map_chr(description, 
+                           ~str_split(., " ", simplify = TRUE)[1])
+  }
+  return(description)
+}
+
+
+
+# set some colors to use
+col_palette <- c("light blue" = "#84ACCE",
+                 "light orange" = "#F6AE2D",
+                 "light green" = "#589D6F",
+                 "light purple" = "#CEA1C3",
+                 "light pink" = "#E68992",
+                 "light brown" = "#9D9980")
+```
+
+
+
+## Applying hierarchical and K-means clustering with 6 clusters to the training data
+
+Let's apply hierarchical clustering to the `food_fndds_log_scaled` pre-processed training dataset.
+
+```{r}
+set.seed(123)
+# compute the distance matrix 
+food_dist <- dist(food_fndds_log_scaled_numeric)
+# apply hierarchical clustering with the Ward linkage
+food_hclust_init <- hclust(food_dist, method = "ward.D")
+# extract 6 clusters from the hierarchical cluster object
+food_hclust <- cutree(food_hclust_init, k = 6)
+```
+
+Our resulting hclust clustering object is a vector of cluster membership:
+
+```{r}
+sample(food_hclust, 20)
+```
+
+Next, we can apply K-means with $K = 6$:
+
+```{r}
+set.seed(29864)
+# apply kmeans with k = 6
+food_kmeans_init <- kmeans(food_fndds_log_scaled_numeric, centers = 6)
+# extract the cluster membership vector
+food_kmeans <- food_kmeans_init$cluster
+```
+
+Our resulting clustering object is also a vector of cluster membership
+
+```{r}
+sample(food_kmeans, 20)
+```
+
+## Examining the clusters
+
+### Qualitative explorations
+
+Let's look at some randomly sampled food items from each cluster, and the size of each cluster. 
+
+
+Let's define a function that prints a random sample of 15 food items from each cluster.
+
+```{r}
+sampleFoodsCluster <- function(.description, .cluster) {
+  tibble(description = .description,
+         cluster = as.factor(.cluster)) |>
+    # select 15 food items from each cluster
+    group_by(cluster) |>
+    # but if there are fewer than 15 food items, just show all food items
+    sample_n(min(c(15, n()))) |>
+    # add an ID so that pivot_wider (below) doesn't yell at me
+    mutate(id = 1:n()) |>
+    ungroup() |>
+    select(id, description, cluster) |>
+    # reformat the data to a wide form
+    pivot_wider(names_from = "cluster", values_from = "description") |>
+    select(-id)
+}
+```
+
+And a function that plots the number of food items in each cluster. 
+
+```{r}
+plotClusterSize <- function(.cluster, 
+                            .sort_by_size = FALSE,
+                            .title = NULL) {
+  # count the number of times each cluster appears in the cluster membership
+  cluster_size <- tibble(cluster = .cluster) |>
+    count(cluster) 
+  
+  # arrange in decreasing order of cluster size
+  if (.sort_by_size) {
+    cluster_size <- cluster_size |>
+      arrange(n)
+  }
+  # generate the bar plot
+  cluster_size |>
+    # make sure that the clusters appear in the order 
+    mutate(cluster = fct_inorder(as.factor(cluster)))  |>
+    ggplot() +
+    geom_col(aes(x = cluster, y = n)) +
+    labs(x = "cluster", y = "number of food items") +
+    ggtitle(paste0(.title))
+}
+```
+
+
+
+Let's look at the hierarchical clusters in terms of 15 randomly selected food items from each cluster and the size of each cluster.
+
+```{r}
+#| layout-nrow: 2
+# set seed to match book
+set.seed(298764)
+sampleFoodsCluster(.description = truncateDescription(food_fndds$description),  
+                   .cluster = food_hclust) |>
+  print(width = Inf)
+plotClusterSize(food_hclust, .sort_by_size = FALSE)
+```
+
+
+For the hierarchical clusters:
+
+- The first cluster seems not to have much of a theme, but vaguely contains fruits and desserts and it also seems to be one of the largest clusters.
+
+- The second cluster also does not seem to have much of a theme, and is also one of the larger clusters.
+
+- The third cluster is also ambiguous but seems to contain mostly cookies, chips and other snacks.
+
+- The fourth cluster has cereals but is a very small cluster.
+
+- The fifth cluster has mostly vegetables.
+
+- The sixth cluster has meats and seafood.
+
+
+
+Let's look next at the K-means clusters
+
+```{r}
+#| layout-nrow: 2
+set.seed(298764)
+kmeans_sample <- sampleFoodsCluster(truncateDescription(food_fndds$description), 
+                   food_kmeans)
+# rearrange the order of the clusters so that they most closely match the 
+# hierarchical clusters and match what is shown in the book
+kmeans_sample <- kmeans_sample[, order(c(2, 1, 3, 4, 6, 5))]
+colnames(kmeans_sample) <- 1:6
+
+kmeans_sample |> print(width = Inf)
+
+plotClusterSize(food_kmeans, .sort_by_size = FALSE)
+```
+
+For the K-means clusters:
+
+- The first cluster seems to contain fruits and deserts, and is the second-largest cluster.
+
+- The second cluster doesn't have a clear theme but contains several milk and rice items.
+
+- The third cluster seems not to have a very clear theme, and is also the largest cluster.
+
+- The fourth cluster contains mostly cheeses and desserts.
+
+- The fifth cluster contains mostly vegetables.
+
+- The sixth cluster contains mostly seafood.
+
+There are definitely a lot of similarities between the two clusters, but also a lot of differences. There are several clusters that seem to contain multiple themes, and in both cases, there is are a few clusters that contains more than half of the food items and doesn't have a clear theme. 
+
+
+Overall, it seems like 6 is probably not enough clusters, but it is encouraging to see distinct themes emerging in at least some of the clusters for both algorithms. 
+
+Since it is easier to visualize fewer clusters, we will first explore these sets of six clusters, to give a sense of how to examine and compare the clusters we have computed, before conducting an analysis to identify what a more appropriate number of clusters might be.
+
+
+
+
+### Comparing variable distributions across each cluster
+
+The plot below shows the distribution of the "carbohydrates" nutrient variable across the (a) hierarchical and (b) K-means clusters using boxplots. Notice that the third and fourth clusters from both algorithms tend to consist of more carbohydrate-heavy food items relative to the other clusters. Notice also that the first, second, fifth, and sixth clusters seem to have very similar distributions across both algorithms, but the third and fourth clusters look quite different (particularly the fourth cluster).
+
+```{r}
+gg_hclust_carbs <- food_fndds |>
+  # add hierarchical clusters
+  mutate(cluster = as.factor(food_hclust)) |>
+  ggplot() +
+  geom_boxplot(aes(x = cluster, y = carbohydrates,
+                   fill = as.factor(cluster))) +
+  theme_classic() +
+  scale_fill_manual(values = as.vector(col_palette), guide = "none") +
+  ggtitle("(a) Hierarchical")
+
+
+gg_kmeans_carbs <- food_fndds |>
+  # add kmeans clusters and rearrange cluster order to best match the hclust
+  mutate(cluster = factor(food_kmeans, levels = c(2, 1, 3, 4, 6, 5))) |>
+  ggplot() +
+  geom_boxplot(aes(x = cluster, y = carbohydrates,
+                   fill = cluster)) +
+  theme_classic() +
+  scale_fill_manual(values = as.vector(col_palette), guide = "none") +
+  scale_x_discrete(labels = 1:6) +
+  ggtitle("(b) K-means")
+
+gg_hclust_carbs + gg_kmeans_carbs
+```
+
+
+
+
+### Projecting clusters onto a two-dimensional scatterplot
+
+Let's next visualize the two sets of clusters created using all variables but visualized in the space just defined by the sodium and protein variables.
+
+```{r}
+#| fig-width: 6
+#| fig-height: 8
+#| fig-align: "center"
+set.seed(28764)
+# get a sample of 1000 foods and add the clusters to it
+foods_1000 <- food_fndds_log_scaled_numeric |>
+  mutate(hclust = as.factor(food_hclust)) |>
+  mutate(kmeans = as.factor(food_kmeans)) |>
+  mutate(description = truncateDescription(food_fndds$description, "first word")) |>
+  sample_n(1000)
+
+# get a sample of 100 food items to annotate
+text_index <- sample(1:nrow(foods_1000), 100)
+
+
+gg_hclust_scatter <- foods_1000 |>
+  ggplot() +
+  geom_point(aes(x = sodium, y = protein, col = hclust),
+             alpha = 0.6) +
+  geom_shadowtext(aes(x = sodium, y = protein, 
+                      label = description, col = hclust),
+                  check_overlap = TRUE, alpha = 0.9, hjust = 0,
+                  nudge_x = 0.05, bg.color = "white",
+                  data = foods_1000[text_index, ]) +
+  scale_color_manual(values = as.vector(col_palette),
+                     guide = "none") +
+  scale_x_continuous(limit = c(0, 5)) +
+  theme_classic() +
+  ggtitle("(a) Hierarchical clustering")  
+
+
+
+gg_kmeans_scatter <- foods_1000 |>
+  ggplot() +
+  geom_point(aes(x = sodium, y = protein, col = kmeans),
+             alpha = 0.6) +
+  geom_shadowtext(aes(x = sodium, y = protein, 
+                      label = description, col = kmeans),
+                  check_overlap = TRUE, alpha = 0.9, hjust = 0,
+                  nudge_x = 0.05, bg.color = "white",
+                  data = foods_1000[text_index, ]) +
+  scale_color_manual(values = as.vector(col_palette[c(2, 1, 3, 4, 6, 5)]),
+                     guide = "none") +
+  scale_x_continuous(limit = c(0, 5)) +
+  theme_classic() +
+  ggtitle("(b) K-means")
+
+gg_hclust_scatter / gg_kmeans_scatter 
+```
+
+The two sets of clusters bear similarities, but also differences. Again, we have tried to manually arrange the clusters so that the same colors were capturing similar clusters in each plot, but since the hierarchical and K-means clusters are not perfectly identical, the colors don't exactly "match up".
+
+
+
+## Quantifying cluster quality
+
+Next, we can compute some of the quantitative metrics of "cluster quality" for our clusters.
+
+
+### Within-cluster Sum of Squares
+
+
+Let's compute the within-cluster sum of squares for each set of clusters.  This compares each data point to the center/mean of its cluster, squares the distance, and then adds up all of these squared distances.
+
+Note that the K-means algorithm reports the within sum of squares metric.
+
+```{r}
+# for each individual cluster
+food_kmeans_init$withinss
+# added up across all clusters
+sum(food_kmeans_init$withinss)
+```
+
+
+But the `hclust()` function does not. So we need to write a function for computing the within-cluster SS for a given dataset and set of clusters.
+
+```{r}
+totWithinSumOfSquares <- function(.data, .clusters) {
+  total_wss <- .data |>
+    # add the clusters as a column to the data frame
+    mutate(cluster = .clusters) |>
+    # turn into a nested data frame/tibble
+    group_by(cluster) |> 
+    nest() |>
+    ungroup() |>
+    rowwise() |>
+    # compute the wss for each cluster separately
+    mutate(wss = summarise_all(data, function(.col) sum((.col - mean(.col))^2)))  |>
+    # add up over all clusters
+    summarise(total_wss = sum(wss)) |>
+    pluck("total_wss")
+  return(sum(total_wss))
+}
+
+
+```
+
+The total within sum of squares for the hierarchical clustering algorithm is computed to be:
+
+```{r}
+totWithinSumOfSquares(food_fndds_log_scaled_numeric, food_hclust)
+```
+
+
+While the total within sum of squares for K-means is slightly lower at
+
+```{r}
+totWithinSumOfSquares(food_fndds_log_scaled_numeric, food_kmeans)
+# check that our manual K-means SS metric matches the inbuilt metric
+food_kmeans_init$tot.withinss
+```
+
+
+Since a lower sum of squares indicates "better" performance, this indicates that the K-means algorithm yields slightly "better" clusters, at least according to this WSS metric. 
+
+#### A simulation study: WSS vs K
+
+The following plot shows how the WSS changes as $K$ increases for the same dataset. It is very clear that as $K$ increases, the WSS decreases.
+
+```{r}
+set.seed(87633)
+purrr::map_df(3:20, function (.k) {
+  # compute the clusters for the given .k value
+  clust <- kmeans(food_fndds_log_scaled_numeric,
+                  centers = .k)
+  # put K and the resulting wss in a data frame
+  data.frame(K = .k,
+             WSS = totWithinSumOfSquares(food_fndds_log_scaled_numeric, 
+                                         .clusters = clust$cluster))
+}) |> ggplot() +
+  # create a lineplot
+  geom_line(aes(x = K, y = WSS)) +
+  theme_classic() +
+  labs(x = "K (number of clusters)") +
+  scale_y_continuous(labels = scales::label_comma())
+```
+
+
+#### A simulation study: WSS vs sample size
+
+Next, we can conduct a similar study, but this time observing how the WSS changes as we gradually increase the sample size (using subsampling) while fixing $K = 6$.  From this figure, it is clear that as the sample size increases, the WSS increases too. 
+
+```{r}
+set.seed(7684)
+purrr::map_df(seq(0.10, 1, by = 0.1), function (.prop) {
+  # take a subsample of size .prop
+  data_sampled <- sample_frac(food_fndds_log_scaled_numeric, .prop)
+  # compute the clusters with K = 6
+  clust <- kmeans(data_sampled,
+                  centers = 6)
+  # put the sample size and WSS in a data frame
+  data.frame(sample_size = round(.prop * nrow(food_fndds_log_scaled_numeric)),
+             WSS = totWithinSumOfSquares(data_sampled, .clusters = clust$cluster))
+}) %>%
+  ggplot() +
+  # create a lineplot
+  geom_line(aes(x = sample_size, y = WSS)) +
+  theme_classic() +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(x = "Sample size")
+```
+
+
+
+
+### Silhouette score
+
+
+Next, we can evaluate the cluster quality by computing the silhouette score for each data point, and plotting them as bars. 
+
+First, we will calculate the silhouette score for each set of clusters
+
+```{r}
+# apply silhouette function to hierarchical clusters
+hclust_silhouette_score <- silhouette(food_hclust, food_dist)
+# the `silhouette()` function is a bit odd, and to use its output we need to
+# reformat the silhouette score object as a tibble
+hclust_silhouette_score <- hclust_silhouette_score[1:nrow(food_fndds_log_scaled_numeric),] |>
+  as_tibble() 
+# compute average silhouette score
+mean(hclust_silhouette_score$sil_width)
+
+
+
+# apply silhouette function to kmeans clusters
+kmeans_silhouette_score <- silhouette(food_kmeans, food_dist)
+# the `silhouette()` function is a bit odd, and to use its output we need to
+# reformat the silhouette score object as a tibble
+kmeans_silhouette_score <- kmeans_silhouette_score[1:nrow(food_fndds_log_scaled_numeric),] |>
+  as_tibble() 
+
+# compute average silhouette score
+mean(kmeans_silhouette_score$sil_width)
+```
+
+
+The average silhouette width for the hierarchical clustering clusters is `r round(mean(hclust_silhouette_score$sil_width), 3)`, and for the Kmeans clusters is slightly higher, at `r round(mean(kmeans_silhouette_score$sil_width), 3)`. Again, this indicates that the K-means algorithm yields slightly "better" clusters, according to the silhouette metric.
+
+Let's write a function that will take either of the silhouette data frames that we created above, and will create a silhouette plot from it. 
+
+
+```{r}
+plotSilhouette <- function(clust_silhouette_df) {
+  clust_silhouette_df |>
+    # force the observations to be arranged in increasing order of silhouette 
+    # width *within* each cluster
+    group_by(cluster) |>
+    mutate(avg_sil = mean(sil_width)) |>
+    ungroup() |>
+    # arrange in order of average silhouette width (and then by the individual 
+    # silhouette widths)
+    arrange(avg_sil, sil_width) |>
+    # add a y-position index
+    mutate(index = 1:n()) |>
+    ggplot() +
+    geom_col(aes(y = sil_width, x = index, 
+                 fill = as.factor(cluster), col = as.factor(cluster))) +
+    coord_flip() +
+    theme(legend.position = "none")
+}
+```
+
+
+The following plots show the silhouette widths for each observation in each cluster. We matched the colors to the scatterplots above. Note that there definitely seem to be more negative silhouette widths in each of the hierarchical clusters than in the K-means clusters.
+
+```{r}
+# create silhouette plot for spectral clustering
+gg_sil_hclust <- plotSilhouette(hclust_silhouette_score) +
+  ggtitle("Hierarchical clustering") +
+  scale_color_manual(values = as.vector(col_palette)) +
+  scale_fill_manual(values = as.vector(col_palette)) 
+gg_sil_kmeans <- plotSilhouette(kmeans_silhouette_score) +
+  ggtitle("Kmeans") +
+  scale_color_manual(values = as.vector(col_palette[c(2, 1, 3, 4, 6, 5)])) +
+  scale_fill_manual(values = as.vector(col_palette[c(2, 1, 3, 4, 6, 5)]))
+
+gg_sil_hclust + gg_sil_kmeans
+```
+
+
+### Rand and adjusted rand indexes
+
+
+Another metric that we can compute is the Rand index and the adjusted Rand index. Rather than being metrics for summarizing the "performance" of one set of clusters (as the WSS and silhouette score were), these are metrics for *comparing* two different sets of clusters of the same data units. This will be useful for conducting a stability analysis for each clustering algorithm (to compare how much the resulting clusters from each algorithm change across perturbations), but for now, let's compare the K-means clusters we have created to the hierarchical clustering clusters. 
+
+The rand index for the K-means and hierarchical clustering algorithm is:
+
+```{r}
+rand.index(food_hclust, food_kmeans)
+```
+
+And the adjusted rand index is:
+
+```{r}
+adj.rand.index(food_hclust, food_kmeans)
+```
+
+
+These indicate some similarity, but since the adjusted Rand Index of 0 indicates absolutely no similarity, while an adjusted Rand Index of 1 indicates perfect similarity, it seems that these two clusters definitely have some significant differences.
+
+
+
+
+
+## Choosing K (the number of clusters)
+
+The code above gives a demonstration of how to do cluster analysis when you already know the number of clusters that you are trying to identify. We based our original choice of $K = 6$ clusters off our admittedly novice domain understanding of food groups.
+
+### Quantitative assessments of K
+
+In this section, we will use cross validation to explore whether there might be some other number of clusters, $K$, that might "better" (in terms of the metrics we have examined above) separate the food items into clusters.
+
+Since our above analyses have determined that the K-means algorithm generally has "better" performance than the hierarchical clustering algorithms (in terms of the silhouette and total WSS metrics we explored), we will focus the rest of our analyses on the K-means algorithm.
+
+
+Let's first create some cross validation folds, and add the fold index as a column to our data.
+
+```{r}
+set.seed(47994)
+# create a vector of fold indexes
+fold <- rep(1:10, each = ceiling(nrow(food_fndds_log_scaled_numeric) / 10))
+# randomly perturb the fold index so that we aren't just putting the first 
+# 10% of rows in the first fold, the second 10% of rows in the second row etc
+fold <- sample(fold[1:nrow(food_fndds_log_scaled_numeric)])
+# add the fold as a column to the food data and create a cv object that we 
+# will work with
+food_cv <- food_fndds_log_scaled_numeric |>
+  mutate(fold = fold)
+```
+
+Then we want to iterate through all values of $K$ we will consider (10 to 50), where for each fold, we will use all but the selected fold to identify the clusters, and then computing the silhouette and sum of squares metrics on the remaining withheld fold. Since we have 10 folds, we will thus end up with 10 metrics for each $K$.  The cluster membership of each withheld data point is decided based on which cluster center it is closest to.
+
+First, let's write a function that computes which cluster each withheld data point belongs to. 
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+
+computeCluster <- function(.data, .centers) {
+  .centers <- as.matrix(.centers)
+  k = nrow(.centers)
+  distances = matrix(0, k, nrow(.data))
+  for (i in 1:k) {
+    # subtract the center from each row
+    differences = apply(.data, 1, function(row) (row - .centers[i, ])^2)
+    # compute the sum of the squares
+    distances[i, ] = apply(differences, 2, sum)
+  }
+  return(apply(distances, 2, which.min))
+}
+
+
+```
+
+Then we will use this function to loop through (using `map()` functions) each fold and each value of $K$ to compute a range of CV silhouette scores. 
+
+
+This code is a bit complex (and is almost certainly not the most efficient way to do this - it takes a while to run), but try to run through line by line to understand what is doing (e.g., define `.k = 10` and `.fold = 1` to see what is happening inside the map functions).
+
+Note that we are using parallel computation `future_map_dfr()` from the `furrr` R package to massively speed up this computation.
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+
+# set parallelization plan
+# if you can't do parallel computation, you can comment out this line 
+# but beware that the code will take a long time to run
+plan(multisession)
+
+eval_cv_k <- map_df(seq(10, 50, 5), function(.k) {
+  cat("Conducting CV evaluation of k =", .k, "...\n")
+  fold_sil <- future_map_dfr(1:10, function(.fold) {
+    
+    # define the "training" folds: all but the current fold
+    # this will be used to define the clusters
+    food_train_fold <- food_cv |> 
+      filter(fold != .fold) |>
+      select(-fold)
+    # define the "validation" fold: the current withheld fold
+    # this will be used to evaluate the clusters
+    food_val_fold <- food_cv |> 
+      filter(fold == .fold) |>
+      select(-fold)
+    
+    # run k-means with the current k on the "training" fold
+    kmeans_fold <- food_train_fold |> 
+      kmeans(centers = .k)
+    # run hclust with the current k on the "training" fold
+    hclust_fold <- food_train_fold |>
+      dist() |>
+      hclust(method = "ward.D") |>
+      cutree(k = .k)
+    
+    # compute the cluster centers for hclust
+    hclust_fold_centers <- food_train_fold %>%
+      mutate(cluster = hclust_fold) %>%
+      group_by(cluster) %>%
+      summarise_all(mean) %>%
+      select(-cluster)
+    
+    # identify which cluster the "validation" data points are in based on which
+    # "training" cluster centers it is closest to
+    kmeans_val_membership <- computeCluster(food_val_fold, kmeans_fold$centers)
+    hclust_val_membership <- computeCluster(food_val_fold, hclust_fold_centers)
+    
+    # calculate silhouette for "validation" fold
+    kmeans_val_sil <- silhouette(kmeans_val_membership,  
+                                 dist(food_val_fold))[1:nrow(food_val_fold), ] |>
+      as_tibble() |>
+      pull(sil_width) |>
+      mean()
+    hclust_val_sil <- silhouette(hclust_val_membership,  
+                                 dist(food_val_fold))[1:nrow(food_val_fold), ] |>
+      as_tibble() |>
+      pull(sil_width) |>
+      mean()
+    
+    return(data.frame(kmeans_sil = kmeans_val_sil,
+                      hclust_sil = hclust_val_sil))
+  }, .id = "fold", .options = furrr_options(seed = TRUE))
+  
+  # clean up the output data frame
+  results <- fold_sil |>
+    mutate(k = .k) |>
+    dplyr::select(k, everything())
+  return(results)
+})
+```
+
+Let's look at the results of our cross validation analysis by plotting the average silhouette width (computed for each CV iteration using on the data in the withheld folds) for each $K$. @sil-cv shows that there is generally a higher silhouette width for larger values of $k$, but that this improvement levels off around $K = 25$. 
+
+
+
+```{r}
+#| label: sil-cv
+#| fig-cap: "The distribution of silhouette widths computed on each of the withheld CV folds, for each value of k (number of clusters, x-axis)."
+# compute the mean silhouette width for each k
+kmeans_mean_sil_cv_k <- eval_cv_k |>
+  group_by(k) |>
+  mutate(mean_sil = mean(kmeans_sil)) |>
+  ungroup()
+hclust_mean_sil_cv_k <- eval_cv_k |>
+  group_by(k) |>
+  mutate(mean_sil = mean(hclust_sil)) |>
+  ungroup()
+
+#hclust
+gg_cv_hclust <- eval_cv_k |>
+  ggplot() +
+  geom_boxplot(aes(x = k, y = hclust_sil, group = k),
+               color = "grey50") +
+  geom_point(aes(x = k, y = hclust_sil),
+             alpha = 0.5, shape = 4) +
+  geom_line(aes(x = k, y = mean_sil),
+             data = hclust_mean_sil_cv_k, color = "grey50") +
+  scale_y_continuous("Witheld fold silhouette score") +
+  scale_x_continuous(breaks = seq(10, 50, 5)) + 
+  ggtitle("(b) Hierarchical clustering")
+# kmeans
+gg_cv_kmeans <- eval_cv_k |>
+  ggplot() +
+  geom_boxplot(aes(x = k, y = kmeans_sil, group = k),
+               color = "grey50") +
+  geom_point(aes(x = k, y = kmeans_sil),
+             alpha = 0.5, shape = 4) +
+  geom_line(aes(x = k, y = mean_sil),
+             data = kmeans_mean_sil_cv_k, color = "grey50") +
+  scale_y_continuous("Witheld fold silhouette score") +
+  scale_x_continuous(breaks = seq(10, 50, 5)) +
+  ggtitle("(b) K-means")
+
+gg_cv_hclust + gg_cv_kmeans
+```
+
+Let's take a look at the $K = 30$ results. 
+
+
+### Qualitative assessments of K
+
+
+
+Let's look at the clusters we uncover with K-means and hierarchical clustering with $K = 30$.
+
+```{r}
+set.seed(86343)
+kmeans_clust_k30 <- kmeans(food_fndds_log_scaled_numeric, centers = 30)
+hclust_clust_k30 <- food_fndds_log_scaled_numeric |>
+  dist() |>
+  hclust() |>
+  cutree(k = 30)
+```
+
+
+
+We can examine the themes of each set of clusters by looking at samples of food items that ended up each cluster, as well as the size of each cluster. 
+
+```{r}
+#| layout-nrow: 2
+set.seed(96234)
+sampleFoodsCluster(truncateDescription(food_fndds$description), 
+                   kmeans_clust_k30$cluster) |>
+  print(width = Inf)
+plotClusterSize(kmeans_clust_k30$cluster, .sort_by_size = FALSE)
+```
+
+If we look at the cluster groups identified by $K = 30$, we identify the following groups (not necessarily in the same order as printed above). Note that each of the entries below is our best approximation to a theme (not all food items in each cluster fit the theme):
+
+
+1. Meats
+
+2. Vegetables
+
+3. Fish
+
+4. (Unclear category but contains many meat 'meals')
+
+5. Alcoholic beverages
+
+6. Fats and oils
+
+7. Cereals and nutritional powder mixes
+
+8. Dairy
+
+9. Vegetables
+
+10. Cereals
+
+11. Breads
+
+12. Fruits, vegetables and juices
+
+13. Chips and nuts
+
+14. Desserts
+
+15. Cheese and other dairy
+
+16. (Unclear category but many pizzas)
+
+17. Beans and other vegetables
+
+18. Eggs
+
+19. Corn and other vegetables
+
+20. Seafood
+
+21. Fruits
+
+22. (Unclear category but contains many cookies and creams)
+
+23. Seafood
+
+24. Beverages
+
+25. (Unclear category but many pancakes and potatoes)
+
+26. Squid, octopus, oysters
+
+27. Energy drinks and coffee
+
+28. (Unclear category but contains many milk items)
+
+29. Meats
+
+30. Pasta, pizza, and burgers
+
+
+
+While our quantitative analysis results indicated that $K = 30$ was a good choice, our own investigations of other values of $K$ mostly demonstrate that the higher the value of $K$, the more specific the cluster categories are. For instance, one particular run of K-means with $K = 100$ yielded highly specific categories like "pizza", "oysters", "corn and beans", "cheeseburgers", "oatmeal", "omelets and french toast", "mustard greens". Overall, it increasingly feels like the choice of $K$ should be based on how specific we want our categories to be, rather than the values of the metrics above. The level of detail we obtained with $K = 30$ seems fairly reasonable, although we will likely want to manually combine some categories.
+
+That said, let's investigate the predictability and stability of our results when $K = 30$. 
+
+
+## PCS analysis of cluster results with K = 30
+
+
+Now let's examine the predictability and stability of our results.
+
+### Predictability
+
+To explore the predictability of our results, we will see what the clusters we have identified (using K-means with $K = 30$) when we use their cluster centers to cluster the external "legacy" data.
+
+
+First we will create and pre-process the legacy dataset
+
+```{r}
+# this legacy dataset serves as the validation set
+food_legacy <- cleanFoodData(nutrient_amount,
+                             food_name,
+                             nutrient_name, 
+                             .select_data_type = "sr_legacy_food") |>
+  # filter to the columns in the fndds dataset
+  select(all_of(colnames(food_fndds))) |>
+  # remove foods with any missing values
+  drop_na()
+food_legacy_log_scaled <- preProcessFoodData(food_legacy,
+                                             .log_transform = TRUE, 
+                                             .center = FALSE, 
+                                             .scale = TRUE)
+food_legacy_log_scaled_numeric <- food_legacy_log_scaled |>
+  select(-description)
+
+description_legacy_trunc <- food_legacy_log_scaled |>
+  mutate(description = truncateDescription(description, length = "first word")) |>
+  mutate(description = str_replace_all(string = description, 
+                                       pattern = ",", 
+                                       replacement = "")) |>
+  pull(description)
+```
+
+
+Next, we will identify which cluster each "legacy" food item belongs to based on the 30 cluster centers we identified from the "fndds" FNDDS data above.
+
+```{r}
+# compute cluster for validation set based on FNDDS centers
+set.seed(9284)
+kmeans_legacy_cluster <- computeCluster(.data = food_legacy_log_scaled_numeric, 
+               .centers = kmeans_clust_k30$centers)
+
+```
+
+
+We can then calculate the average silhouette width and within sum of squares of these clustered legacy food items.
+
+Below, the silhouette width is computed both for the original FNDDS data with K = 30 and for the legacy food items (clustered according to the 30 original FNDDS cluster centers). The Legacy silhouette score is actually *higher* (better) than for the FNDDS foods!
+
+```{r}
+# calculate K=30 K-means silhouette score
+kmeans_fndds_sil <- silhouette(kmeans_clust_k30$cluster, food_dist)[1:nrow(food_fndds_log_scaled_numeric),] |>
+  as_tibble()
+# silhouette score
+fndds_k30_sil <- mean(kmeans_fndds_sil$sil_width)
+fndds_k30_sil
+
+# calculate silhouette for these legacy food items
+kmeans_legacy_sil <- silhouette(kmeans_legacy_cluster,
+                                dist(food_legacy_log_scaled_numeric))[1:nrow(food_legacy_log_scaled_numeric), ] |>
+  as_tibble() 
+legacy_k30_sil <- mean(kmeans_legacy_sil$sil_width)
+legacy_k30_sil
+```
+
+Note that since the two datasets have a different number of food items, the total WSS is not directly comparable so we won't compute it here.
+
+Unfortunately also since we are looking at so many clusters, it is hard to visualize the clusters (if we are coding them by color) in the data space using a scatterplot as we did for K = 6.
+
+We can, however look at 15 randomly chosen legacy food items from each cluster to see if this will highlight any similarities between the categories we identified for the FNDDS clusters:
+
+
+```{r echo = FALSE}
+sampleFoodsCluster(truncateDescription(food_legacy_log_scaled$description, length = "first phrase"),
+                   kmeans_legacy_cluster) |>
+  print(width = Inf)
+```
+
+The general themes we can identify are shown in the table below. The clusters that seem to at least approximately have the same theme across the two datasets are shown in bold. Note that the two datasets have different naming conventions as well as different foods included in them.
+
+
+| Cluster | FNDDS | Legacy |
+|:--------|:------|:-------|
+|1 | **Meats** | **Meats** |
+|2 | Vegetables |  (Unclear category) |
+|3 | **Fish** | **Fish** |
+|4 | **(Unclear category but contains many meat 'meals')** | **(Unclear category but many fast food items)** |
+|5 | **Alcoholic beverages** | **Alcoholic beverage** |
+|6 | **Fats and oils** | **Oils** |
+|7 | **Cereals and nutritional powder mixes** | **Cereals, spices, and baby food** |
+|8 | **Dairy** | **Dairy and infant formula** |
+|9 | **Vegetables** | **Vegetables** |
+|10 | **Cereals** | **Cereals** |
+|11 | **Breads** | **Breads** |
+|12 | **Fruits, vegetables, and juices** | **Fruits and vegetables** |
+|13 | **Chips and nuts** | **Nuts and other snacks** |
+|14 | **Desserts** | **Candies and cookies** |
+|15 | **Cheese and other dairy** | **Cheese and other dairy** |
+|16 | (Unclear category but many pizzas) | Infant formula, cheese, and fast food |
+|17 | **Beans and other vegetables** | **Beans and other vegetables** |
+|18 | **Eggs** | **Eggs and poultry** |
+|19 | **Corn and other vegetables** | **Vegetables** |
+|20 | **Seafood** | **Seafood** |
+|21 | **Fruits** | **Fruits** |
+|22 | (Unclear category) | Oils, nuts and candy |
+|23 | **Seafood** | **Seafood** |
+|24 | **Beverages** | **Beverages** |
+|25 | (Unclear category but many pancakes and potatoes) | Snacks |
+|26 | Squid, octopus, oysters | Veal, Beef and mollusks |
+|27 | **Energy drinks and coffee** | **Beverages** |
+|28 | **(Unclear category but many milk items)** | **(Unclear category but many milk items)** |
+|29 | **Meats** | **Meats** |
+|30 | **Pasta, pizza, and burgers** | **Fast foods** |
+
+Overall 25 of the 30 Legacy food item clusters (which are computed based on the FNDDS cluster centers) seem to have a similar theme (based on our subjective opinion) to the original clusters in the original FNDDS dataset, and those that don't quite match tend to have some similar food items too. This is fairly impressive predictability performance, and since the Legacy and FNDDS datasets have different foods in them and likely different nutrient measurement techniques, some differences are not totally unexpected, but the reasonable extent to which the Legacy food items match the FNDDS clusters is certainly encouraging.
+
+Over all our impression is that the clusters we have identified have pretty good predictability. 
+
+
+### Stability
+
+
+Next, let's investigate the stability of our clustering algorithm and results.
+
+#### Stability to the choice of algorithm
+
+Early on in our analysis, we observed that the K-means algorithm yielded better results than the hierarchical clustering algorithm, but this was just focusing on $K = 6$. Let's consider what happens when we use $K = 30$.
+
+Let's compute some hierarchical clusters with $K = 30$.
+
+```{r}
+hclust_clust_k30 <- food_fndds_log_scaled_numeric |>
+  dist() |>
+  hclust(method = "ward.D") |> 
+  cutree(k = 30)
+```
+
+
+The code below computes the average silhouette width for the hierarchical clustering algorithm with 30 clusters.
+
+```{r}
+silhouette(hclust_clust_k30, 
+           dist(food_fndds_log_scaled_numeric))[1:nrow(food_fndds_log_scaled_numeric),] |>
+  as_tibble() |>
+  summarise(mean(sil_width))
+```
+
+Again, we see that the hierarchical clustering yields lower silhouette widths on average than K-means (the K-means silhouette width is `r round(mean(kmeans_fndds_sil$sil_width), 3)`.
+
+The two sets of clusters have fairly high similarity according to the Rand and adjusted Rand indexes:
+
+```{r}
+rand.index(hclust_clust_k30, kmeans_clust_k30$cluster)
+adj.rand.index(hclust_clust_k30, kmeans_clust_k30$cluster)
+```
+
+
+Below we print out some randomly sampled food items from each hierarchical cluster:
+
+```{r}
+set.seed(467824)
+sampleFoodsCluster(food_fndds$description,
+                   hclust_clust_k30)  |>
+  print(width = Inf)
+```
+
+These clusters seem to have very clear categories. We might even argue that their categories actually seem *clearer* than the K-means clusters (at least there certainly seem to be fewer clusters with ambiguous/unclear categories), despite the fact that the silhouette width is "worse".
+
+
+#### Stability to algorithmic randomness
+
+Next, let's investigate how much the clusters change across the randomness inherent in the K-means algorithm itself (the algorithm starts with different random initial cluster centers every time).
+
+We will just look at four different implementations of the K-means algorithm to get a sense of how much they change.
+
+```{r}
+set.seed(9634)
+# implement the same algorithm 4 times
+cluster_alg_iter <- purrr::map_df(1:4, function(iter) {
+  
+  # run K-means with K = 6
+  cluster_iter <- kmeans(food_fndds_log_scaled_numeric, 30)
+  
+  # compute the silhouette score
+  sil_alg <- silhouette(cluster_iter$cluster, 
+                        dist(food_fndds_log_scaled_numeric))[1:nrow(food_fndds_log_scaled_numeric),] |>
+    as_tibble() 
+  
+  return(data.frame(description = food_fndds$description, 
+                    cluster_iter = cluster_iter$cluster,
+                    sil_width = sil_alg$sil_width))
+}, .id = "iter")
+
+# define a data frame with the original clusters
+cluster_orig <- data.frame(cluster = food_kmeans,
+                           description = food_fndds$description)
+```
+
+
+The distribution of silhouette widths for all data points is almost identical: 
+
+
+```{r}
+cluster_alg_iter |>
+  ggplot() +
+  geom_boxplot(aes(x = iter, y = sil_width))
+```
+
+
+We can also look at the Rand index and adjusted Rand index with the original clustering for each iteration of the K-means algorithm (as well as the average silhouette width) in the table below.
+
+```{r}
+# compute the Rand index and adjusted rand index to compare our original clusters 
+# with these new clusters
+cluster_orig |>
+  inner_join(cluster_alg_iter, by = "description") |>
+  group_by(iter) |>
+  summarise(rand = rand.index(cluster, cluster_iter),
+            adj_rand = adj.rand.index(cluster, cluster_iter),
+            sil = mean(sil_width)) 
+```
+
+These results show that the Rand index is fairly consistent, but the adjusted Rand index is a bit more variable. 
+
+The final column showed the average silhouette width for each iteration, and it appears to be relatively consistent. Overall, these results indicate reasonable similarity.
+
+
+
+#### Stability to data perturbations
+
+
+Next, we conduct a similar analysis, but this time also perturbing the *data* using reasonable perturbations (the same perturbations that we used in our PCA PCS analysis). Specifically, we will investigate two types of data perturbations below:
+
+1. Bootstrap sampling: to represent the fact that different food items may have been included in the observed data
+
+1. Adding random noise: to represent inaccuracies in the nutrient measurements.
+
+
+
+We will re-compute the principal components using 4 different versions of the training data, each of which involves a bootstrap sample of the original food items, and each of which has been modified by adding a small amount of "noise" where we add random numbers whose magnitude is up to around 20% of the observed measurement. Since our data has been scaled to have standard deviation 1, we roughly approximate such noise using random numbers drawn from a Gaussian distribution that has mean 0 and standard deviation of 0.2 multiplied by the mean of each column (to represent an error of 20%). For any resulting perturbed values that ended up being negative, we rounded them up to 0.
+
+
+```{r}
+# use same seed as in data perturbation above
+set.seed(287634)
+cluster_perturb_iter <- purrr::map_df(1:4, function(iter) {
+  
+  # take bootstrap samples
+  food_perturb <- food_fndds_log_scaled |>
+    # add random noise
+    mutate(across(where(is.numeric), 
+                  function(.x) .x + rnorm(n(), 0, 0.2 * mean(.x)))) |>
+    # if any observations are negative, round them up to 0
+    mutate(across(where(is.numeric), 
+                  function(.x) if_else(.x < 0, true = 0, false = .x))) |>
+    # subsampling
+    sample_frac(1, replace=TRUE)
+  
+  # run K-means algorithm
+  cluster_perturb <- kmeans(select(food_perturb, -description), 30)
+  
+  # compute silhouette width
+  sil_perturb <- silhouette(cluster_perturb$cluster, 
+                            dist(dplyr::select(food_perturb, -description)))[1:nrow(food_perturb),] |>
+    as_tibble()
+  
+  return(data.frame(description = food_perturb$description, 
+                    cluster_perturb = cluster_perturb$cluster,
+                    sil_width = sil_perturb$sil_width))
+}, .id = "iter")
+```
+
+
+The distribution of silhouette widths for all data points is almost identical: 
+
+```{r}
+cluster_perturb_iter |>
+  ggplot() +
+  geom_boxplot(aes(x = iter, y = sil_width))
+```
+
+
+Below we look at the results in a table. Again, we see similar results to our analysis in the previous section, where the rand index is again fairly decent, but the adjusted rand index indicates that the similarity after "adjusting for chance" is hovering between 0.52 and 0.62, which indicates some similarity, but far from identical. The silhouette scores are relatively similar across all iterations, however they are a bit lower than the repeated runs of the algorithm without perturbing the data itself. 
+
+```{r}
+# compute the rand index and silhouette width with the original clusters
+cluster_orig |>
+  # inner join will only include the food items common to both datasets
+  inner_join(cluster_perturb_iter, by = "description") |>
+  group_by(iter) |>
+  summarise(rand = rand.index(cluster, cluster_perturb),
+            adj_rand = adj.rand.index(cluster, cluster_perturb),
+            sil = mean(sil_width)) 
+```
+
+
+
+#### Stability to pre-processing judgment call perturbations
+
+Finally, let's look at how much the pre-processing judgment calls we made impact our results. Like the PCA pre-processing judgment calls, the analysis above is based on a version of the data that has been log-transformed and scaled, but we did not mean-center them. Since we have nutrients on vastly different scales, and we don't want nutrients with larger values to dominate the cluster algorithm, we always scale our data prior to clustering (i.e., "scaling" is not a judgment call that we are interested in perturbing). We will thus focus on exploring how our results change when we use alternative transformation (log transformed vs untransformed) and centering (centering vs not centering). Note that in theory, centering our data *should* make no difference to the results of the K-means algorithm, but it is worth exploring anyway. 
+
+Let's repeat our cluster analyses using these alternative data cleaning judgment calls. 
+
+```{r}
+perturb_options <- expand_grid(center = c(TRUE, FALSE),
+                               log = c(TRUE, FALSE)) |>
+  mutate(perturbation_id = as.character(1:n())) |>
+  mutate(perturbation = case_when(center & log ~ "log, center",
+                                  center & !log ~ "center",
+                                  !center & log ~ "log",
+                                  !center & !log ~ "none"))
+
+
+# create a data frame consisting of all of the clusters
+# group for each judgment call perturbation
+perturbed_jc_clusters_df <- map_df(1:nrow(perturb_options), function(i) {
+  # pre-process dataset using the current judgment call i
+  food_preprocessed_jc <- preProcessFoodData(food_fndds,
+                                            .log_transform = perturb_options$log[i],
+                                             .center = perturb_options$center[i],
+                                             .scale = TRUE)
+  
+  # run K-means algorithm
+  # set the same seed every time so that we are perturbing 
+  # the judgment calls, but not the cluster start points
+  set.seed(438764)
+  cluster_perturb_jc <- food_preprocessed_jc |>
+    select(-description) |>
+    kmeans(centers = 30)
+  
+  # compute silhouette width
+  sil_perturb_jc <- silhouette(cluster_perturb_jc$cluster, 
+                               dist(dplyr::select(food_preprocessed_jc, -description)))[1:nrow(food_preprocessed_jc),] |>
+    as_tibble()
+  
+  results <- tibble(description = food_preprocessed_jc$description, 
+                    cluster_perturb = cluster_perturb_jc$cluster,
+                    sil_width = sil_perturb_jc$sil_width) |>
+    # add the food variables back in
+    left_join(food_preprocessed_jc, by = "description")
+  
+  return(results)
+}, .id = "perturbation_id")
+
+```
+
+
+Let's investigate the distribution of silhouette scores for each perturbation. The silhouette widths have a higher median value, but also a wider range (there are many points with substantially worse silhouette widths) when we *do not* use a log-transformation. Centering the data no difference (which is actually to be expected, since distances are the same regardless of whether we center the data or not, but it is always good to check). 
+
+```{r}
+perturbed_jc_clusters_df |>
+  left_join(perturb_options, by = "perturbation_id") |>
+  ggplot() +
+  geom_boxplot(aes(x = perturbation, y = sil_width))
+```
+
+
+
+The bar chart in @fig-clusters-bar below shows the number of observations in each cluster. The clusters computed on the log-transformed data have more evenly sized clusters, whereas the clusters computed on the un-transformed data have one big cluster that contains more than 2,000 food items, and another one that contains more than 1,500 food items, which is not ideal.
+
+
+```{r}
+#| label: fig-clusters-bar
+#| fig-cap: "Bar charts showing the size of each cluster computed for the untransformed and log-transformed data."
+perturbed_jc_clusters_df |>
+  # add the perturbation descriptions 
+  left_join(perturb_options, by = "perturbation_id") |>
+  filter(perturbation %in% c("none", "log"))  |>
+  group_by(perturbation) |>
+  count(cluster_perturb) |>
+  ggplot() +
+  geom_col(aes(x = cluster_perturb, y = n)) +
+  facet_wrap(~perturbation, ncol = 1) +
+  labs(x = "cluster", y = "Number of data points in cluster")
+```
+
+
+### PCS conclusion
+
+These findings indicate that our results are generally fairly predictable and are also reasonably stable. 
+
+
+## Final clustering results
+
+Keep in mind that our goal is to provide a food group label that will help us categorize the food items. It seems as though the higher the value of $K$, the more specific the categories identified. Since the level of specificity in the categories identified with $K = 30$ feels fairly reasonable, we decide to work with the $K = 30$ results that we examined in this document. We showed that these results were reasonably predictable and at least moderately stable. 
+
+
+Our intention is to use the results of one particular run of the K-means clustering algorithm with $K = 30$, and we will then we will need to manually name each category that each cluster corresponds to based on our opinion ("cereal", "leafy greens", etc). 
+
+The code below converts the clusters to actual categories and for categories with an unclear theme, places the category name in parentheses. We simplified a few categories (e.g., "leafy greens" and "corn and other vegetables" are now under "fruits and vegetables").
+
+```{r}
+set.seed(86343)
+kmeans_clust_k30 <- kmeans(food_fndds_log_scaled_numeric, centers = 30)
+sampleFoodsCluster(food_fndds$description, .cluster = kmeans_clust_k30$cluster) |>
+  print(width = Inf)
+
+food_categories <- tibble(description = food_fndds$description,
+                          cluster = kmeans_clust_k30$cluster) |>
+  mutate(cluster_category = case_when(
+    cluster == 1 ~ "Meats",
+    cluster == 2 ~ "Vegetables",
+    cluster == 3 ~ "Seafood",
+    cluster == 4 ~ "(Unknown)",
+    cluster == 5 ~ "Alcoholic beverages",
+    cluster == 6 ~ "Fats and oils",
+    cluster == 7 ~ "Cereals",
+    cluster == 8 ~ "Dairy",
+    cluster == 9 ~ "Fruits and Vegetables",
+    cluster == 10 ~ "Cereals",
+    cluster == 11 ~ "Breads",
+    cluster == 12 ~ "Fruits and Vegetables",
+    cluster == 13 ~ "Snacks",
+    cluster == 14 ~ "Desserts",
+    cluster == 15 ~ "Dairy",
+    cluster == 16 ~ "(Unknown)",
+    cluster == 17 ~ "Fruits and Vegetables",
+    cluster == 18 ~ "Eggs",
+    cluster == 19 ~ "Fruits and Vegetables",
+    cluster == 20 ~ "Seafood",
+    cluster == 21 ~ "Fruits and Vegetables",
+    cluster == 22 ~ "(Unknown)",
+    cluster == 23 ~ "Seafood",
+    cluster == 24 ~ "Beverages",
+    cluster == 25 ~ "(Unknown)",
+    cluster == 26 ~ "Seafood",
+    cluster == 27 ~ "Beverages",
+    cluster == 28 ~ "(Unknown)",
+    cluster == 29 ~ "Meats",
+    cluster == 30 ~ "Meat meals"
+  ))
+```
+
+Below, we can look at the results of this first pass of clustering with $K = 30$ (where we have manually defined and simplified the names of each cluster) for a random sample of 30 food items:
+
+```{r}
+set.seed(27684)
+results <- food_categories |> 
+  transmute(description = str_trunc(description, 40),
+            cluster_category) |>
+  sample_n(30) |>
+  arrange(cluster_category) |>
+  # make it print all of the rows
+  as.data.frame()
+results
+```
+
+These results are pretty impressive. 
+
+One idea to improve these clusters is to do *another "layer"* of clustering, where we create some additional clusters within each cluster to see if we can tease out some more groups, and to see if the mistakes get separated from the non-mistakes. 
+
+Another idea is to increase the number of clusters (e.g., set $K = 100$) and manually aggregate the highly specific categories you obtain into more general categories. This will be a lot more work though, since you will need to manually identify the theme of many more clusters.
+
+You could also try using the hierarchical clustering algorithm instead of K-means, since our brief exploration in our stability analysis suggested that despite the quantifiable metrics, the hierarchical clustering algorithm might yield fewer "unclear" clusters.
+
+Another option is to combine the results of multiple clustering algorithms using a "majority vote" kind of system.
+
+These explorations will be an exercise for the ambitious reader, but regardless, if these results are going to be put into production, someone is going to have to go through and manually fix any remaining mistakes (it will be almost impossible for a purely data-driven approach to perfectly categorize every food item in the data).
+
+
+
+## EDA of clustering results
+
+Aside from being useful for categorizing food items in our hypothetical app, our results are also very useful exploratory tool by allowing us to visualize the distribution of food items in our dataset for the first time in @fig-category-dist:
+
+```{r}
+#| label: fig-category-dist
+#| fig-cap: "The distribution of the food item categories"
+food_categories |>
+  count(cluster_category) |>
+  arrange(desc(n)) |>
+  mutate(category = fct_inorder(cluster_category)) |>
+  ggplot() +
+  geom_col(aes(x = category, y = n)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+```
+
+What we can see is that the largest food category (ignoring the "Unknown" category) is fruits and vegetables, followed by meat-based meals and then meats themselves. 
+
+## [Exercise: to complete] Visualizing the data in principal component space
+
+
+## [Exercise: to complete] Clustering the columns

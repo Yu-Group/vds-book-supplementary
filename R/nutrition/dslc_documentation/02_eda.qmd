@@ -1,0 +1,630 @@
+---
+title: "[Chapter 6] Exploring the nutrition data"
+subtitle: "[DSLC stages]: EDA"
+format: 
+  html:
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+    df-print: kable
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+We examined and cleaned the nutrition data in the file `01_cleaning.qmd`. In this document, you will find the code for conducting an EDA of the nutrition data. This document is far from exhaustive and you are encouraged to add some sections to conduct your own explorations of this data.
+
+
+In each code file that uses the cleaned version of the data, it is good practice to load in the original "raw" (uncleaned) data and then clean it using the cleaning function you wrote. It is often helpful to keep a copy of the original uncleaned data in your environment too. 
+
+First we will load in the libraries that we will use. Note that if you don't have `superheat`, we recommend downloading it from github using the devtools code that is commented out, rather than from CRAN (the CRAN version is outdated). 
+
+```{r}
+#| message: false
+#| warning: false
+library(tidyverse)
+library(patchwork)
+# to install the superheat library run the following code:
+# library(devtools)
+# devtools::install_github("rlbarter/superheat")
+library(superheat)
+```
+
+Next, we will load the cleaning and pre-processing functions that we wrote. 
+
+```{r}
+# source the cleaning function code
+source("functions/cleanFoodData.R")
+source("functions/preProcessFoodData.R")
+
+```
+
+And load in the raw data objects and clean them. We will create a cleaned version of both the FNDDS and Legacy datasets. We will also pre-process each dataset, by log-transforming and SD-scaling them (we won't center them). 
+
+```{r}
+# load in all of the raw data objects
+nutrient_amount <- read_csv("../data/food_nutrient.csv")
+food_name <- read_csv("../data/food.csv")
+nutrient_name <- read_csv("../data/nutrient_name.csv")
+
+# Clean the FNDDS data
+food_fndds <- cleanFoodData(.nutrient_amount_data = nutrient_amount, 
+                            .food_name_data = food_name,
+                            .nutrient_name_data = nutrient_name, 
+                            # fndds is the default value
+                            .select_data_type = "survey_fndds_food")
+# Preprocess the FNDDS data
+food_fndds_log_scaled <- preProcessFoodData(food_fndds, 
+                                                     .log_transform = TRUE,
+                                                     .center = FALSE,
+                                                     .scale = TRUE,
+                                                     .remove_fat = FALSE)
+# Clean the Legacy data
+food_legacy <- cleanFoodData(.nutrient_amount_data = nutrient_amount, 
+                             .food_name_data = food_name,
+                             .nutrient_name_data = nutrient_name, 
+                             .select_data_type = "sr_legacy_food")
+# Preprocess the Legacy data
+food_legacy_log_scaled <- preProcessFoodData(food_legacy,
+                                                     .log_transform = TRUE,
+                                                     .center = FALSE,
+                                                     .scale = TRUE,
+                                                     .remove_fat = FALSE)
+```
+
+
+
+
+## High-level summary of the data
+
+
+Here are some histograms of the nutrients. 
+
+Ironically, the easiest way to plot these using ggplot is to first revert the data back to a long format.
+
+```{r}
+#| fig-height: 18
+food_fndds |> 
+  # convert the data to a long format (ignoring the first description column)
+  pivot_longer(2:ncol(food_fndds), 
+               names_to = "nutrient", 
+               values_to = "amount") |>
+  # plot histograms
+  ggplot() +
+  geom_histogram(aes(x = amount)) +
+  facet_wrap(~nutrient, scales = "free", ncol = 3)
+```
+
+The distributions of each of these nutrients is fairly skewed. 
+
+After log-transforming and standardizing these nutrients however, some of them look substantially more symmetrical. Some of the nutrients that were particularly skewed are still fairly skewed.
+
+```{r}
+#| fig-height: 18
+food_fndds_log_scaled |> 
+  pivot_longer(2:ncol(food_fndds), 
+               names_to = "nutrient", 
+               values_to = "amount") |> 
+  ggplot() +
+  geom_histogram(aes(x = amount)) +
+  facet_wrap(~nutrient, scales = "free", ncol = 3)
+```
+
+The following table shows a random sample of 15 food items. 
+
+```{r}
+set.seed(3243581)
+food_fndds |> 
+  sample_n(15)  |>
+  arrange(description)
+```
+
+
+
+Next, let's look at a heatmap of the entire dataset. There are clearly some columns that are similar, but arranged alphabetically, it is very hard to tease apart what they are.
+
+
+```{r}
+#| label: fig-heatmap
+#| fig-cap: "A heatmap of all nutrient variables (scaled to a common scale)"
+#| fig-width: 9
+
+# create a version of the data to visualize in the heatmap
+food_fndds |>
+  dplyr::select(-description,-caffeine, -moisture, -alcohol, -theobromine) |>
+  mutate_all(~(. - mean(.)) / sd(.)) |>
+  # convert the dataset to a long-form
+  pivot_longer(everything(), names_to = "nutrient", values_to = "value") |>
+  # create a row ID variable
+  group_by(nutrient) |>
+  mutate(id = 1:n()) |>
+  ungroup() |>
+  # plot a heatmap
+  ggplot() +
+  geom_tile(aes(x = nutrient, y = id, fill = value)) +
+  # choose the fill gradient
+  scale_fill_gradientn("Scaled nutrient value",
+                       colors = c("white", "grey80", "grey30", "black"),
+                       values = c(0, 0.015, 0.02, 1)) +
+  # do some formatting stuff
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "top") +
+  labs(x = NULL, y = NULL)
+```
+
+Let's create an explanatory version of this heatmap that arranges the nutrient columns so that similar nutrients are grouped together. We made these grouping decisions based on our own domain knowledge as well as an initial version of this heatmap. We will also arrange the food items/rows using a "clustering" algorithm that we will introduce in Chapter 8. 
+
+
+@fig-heatmap-fancy shows the result. 
+
+
+```{r}
+#| label: fig-heatmap-fancy
+#| fig-cap: "A heatmap of all nutrient variables (scaled to a common scale)"
+#| fig-width: 9
+
+# create a version of the data to visualize in the heatmap
+food_heatmap <- food_fndds |>
+  dplyr::select(-description,-caffeine, -moisture, -alcohol, -theobromine) |>
+  mutate_all(~(. - mean(.)) / sd(.))
+
+# define a vector for manually arranging the nutrient columns into nutrient groups
+nutrient_order <- c(# vitamins
+  "vitamin_b6", "alpha_tocopherol",  "riboflavin", "thiamine", "folate", "niacin", "vitamin_c", "vitamin_b12", "retinol",  "beta_carotene", "lutein_zeaxanthin", "phylloquinone", "lycopene", "cryptoxanthin", "alpha_carotene",
+  #major minerals
+  "sodium", "potassium", "calcium", "phosphorus", "magnesium", "total_choline",
+  # trace minerals
+  "iron", "zinc", "selenium", "copper",
+  # carbohydrates
+  "carbohydrates", "total_dietary_fiber",
+  # fats
+  "fat", "saturated_fat", "monounsaturated_fat", "polyunsaturated_fat", "palmitic_acid", "stearic_acid", "oleic_acid", "linoleic_acid", "arachidonic_acid", "palmitoleic_acid", "alpha_linolenic_acid", "eicosenoic_gadoleic_acid", "cholesterol", "butyric_acid", "caproic_acid", "caprylic_acid", "capric_acid", "myristic_acid", "lauric_acid", "docosapentaenoic_acid", "docosahexaenoic_acid",  "parinaric_acid", "ecosapentenoic_acid", "erucic_acid", 
+  # calories
+  "calories",
+  # protein
+  "protein")
+
+# do a fancy clustering to decide the order of the rows/food items
+# you'll learn this in chapter 8
+food_order <- hclust(dist(food_heatmap))$order
+
+
+food_heatmap[food_order, nutrient_order] |>
+  # convert the dataset to a long-form
+  pivot_longer(everything(), names_to = "nutrient", values_to = "value") |>
+  # ensure that the nutrient columns appear in the correct order by 
+  # reordering the factor levels
+  mutate(nutrient = fct_inorder(nutrient)) |>
+  # create a row ID variable
+  group_by(nutrient) |>
+  mutate(id = 1:n()) |>
+  ungroup() |>
+  # plot a heatmap
+  ggplot() +
+  geom_tile(aes(x = nutrient, y = id, fill = value)) +
+  # add some boundary lines
+  geom_vline(xintercept = c(0.5, 15.5, 21.5, 25.5, 27.5, 51.5, 52.5, 53.5),
+             color = "grey20", linewidth = 1.2) +
+  geom_hline(yintercept = c(0, nrow(food_heatmap)),
+             color = "grey20", linewidth = 1.2) +
+  # choose the fill gradient
+  scale_fill_gradientn("Scaled nutrient value",
+                       colors = c("white", "grey80", "grey30", "black"),
+                       values = c(0, 0.015, 0.02, 1)) +
+  # do some formatting stuff
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "top") +
+  labs(x = NULL, y = NULL)
+```
+
+### PCS evaluation of heatmap exploration
+
+#### Predictability
+
+Let's see if these same patterns exist in the Legacy food dataset. Below, we recreate the heatmap using the Legacy dataset. Note that we are coloring missing values blue.
+
+```{r}
+#| label: fig-heatmap-legacy
+#| fig-cap: "A heatmap of all nutrient variables (scaled to a common scale). Missing values are shown as blue entries."
+#| fig-width: 9
+
+# create a version of the data to visualize in the heatmap
+food_legacy_heatmap <- food_legacy |>
+  select(one_of(colnames(food_fndds))) |>
+  dplyr::select(-description,-caffeine, -moisture, -alcohol, -theobromine) |>
+  mutate_all(~(. - mean(., na.rm = TRUE)) / sd(., na.rm = TRUE))
+
+# do a fancy clustering to decide the order of the rows/food items
+# you'll learn this in chapter 8
+# impute missing values with mean 
+food_legacy_heatmap_imputed <- food_legacy_heatmap |> mutate(across(where(is.numeric), 
+                                                                    ~if_else(is.na(.), mean(., na.rm = TRUE), .)))
+food_legacy_order <- hclust(dist(food_legacy_heatmap_imputed))$order
+
+
+food_legacy_heatmap[food_legacy_order, nutrient_order] |>
+  # convert the dataset to a long-form
+  pivot_longer(everything(), names_to = "nutrient", values_to = "value") |>
+  # ensure that the nutrient columns appear in the correct order by 
+  # reordering the factor levels
+  mutate(nutrient = fct_inorder(nutrient)) |>
+  # create a row ID variable
+  group_by(nutrient) |>
+  mutate(id = 1:n()) |>
+  ungroup() |>
+  # plot a heatmap
+  ggplot() +
+  geom_tile(aes(x = nutrient, y = id, fill = value)) +
+  # add some boundary lines
+  geom_vline(xintercept = c(0.5, 15.5, 21.5, 25.5, 27.5, 51.5, 52.5, 53.5),
+             color = "grey20", linewidth = 1.2) +
+  geom_hline(yintercept = c(0, nrow(food_legacy_heatmap)),
+             color = "grey20", linewidth = 1.2) +
+  # choose the fill gradient
+  scale_fill_gradientn("Scaled nutrient value",
+                       colors = c("white", "grey80", "grey30", "black"),
+                       values = c(0, 0.015, 0.02, 1), na.value = "lightsteelblue1") +
+  # do some formatting stuff
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "top") +
+  labs(x = NULL, y = NULL)
+```
+
+Since the food items between the FNDDS and Legacy datasets are different, we don't expect to see the exact same patterns, but we do see that columns that had similar patterns in the FNDDS dataset also seem to have similar patterns in the Legacy dataset.
+
+#### Stability to transformation judgment call
+
+Let's investigate the stability of this heatmap result to the judgment call of log-transforming the data (the original version was scaled and centered, but not log-transformed).
+
+When we use the *log-transformed* scaled and centered data, the trends are fairly similar. Note, however, that for both plots we had to do a lot of finagling with the `scale_fill_gradientn()` `values`  argument that controls the positions of the color transition. 
+
+```{r}
+#| label: fig-heatmap-log
+#| fig-cap: "A heatmap of all nutrient variables (mean-centered, scaled to a common scale and log-transformed)"
+#| fig-width: 9
+
+# create a version of the data to visualize in the heatmap
+food_heatmap_log <- food_fndds_log_scaled |>
+  dplyr::select(-description,-caffeine, -moisture, -alcohol, -theobromine) |>
+  mutate_all(~. - mean(.))
+
+
+food_heatmap_log[food_order, nutrient_order] |>
+  # convert the dataset to a long-form
+  pivot_longer(everything(), names_to = "nutrient", values_to = "value") |>
+  # ensure that the nutrient columns appear in the correct order by 
+  # reordering the factor levels
+  mutate(nutrient = fct_inorder(nutrient)) |>
+  # create a row ID variable
+  group_by(nutrient) |>
+  mutate(id = 1:n()) |>
+  ungroup() |>
+  # plot a heatmap
+  ggplot() +
+  geom_tile(aes(x = nutrient, y = id, fill = value)) +
+  # add some boundary lines
+  geom_vline(xintercept = c(0.5, 15.5, 21.5, 25.5, 27.5, 51.5, 52.5, 53.5),
+             color = "grey20", linewidth = 1.2) +
+  geom_hline(yintercept = c(0, nrow(food_heatmap)),
+             color = "grey20", linewidth = 1.2) +
+  # choose the fill gradient
+  scale_fill_gradientn("Scaled nutrient value",
+                       colors = c("white", "grey80", "grey30", "black"),
+                       values = c(0, 0.15, 0.17, 1)) +
+  # do some formatting stuff
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "top") +
+  labs(x = NULL, y = NULL)
+```
+
+
+
+## Correlation exploration
+
+Prompted by the heatmaps above, we next ask *which nutrient variables are correlated with one another*. 
+
+The heatmap below in @fig-cor-heat (created using `superheat()` this time) displays the *correlation matrix* of the nutrients. The `pretty.order.rows = TRUE` and `pretty.order.cols = TRUE` arguments tell `superheat()` to use a clustering algorithm (see Chapter 8) under-the-hood to order the rows/columns so that similar rows/columns will appear next to one another.
+
+It is even clearer from this figure that there are some groups of highly correlated nutrients.
+
+
+```{r}
+#| label: fig-cor-heat
+#| fig-cap: "A heatmap of the correlation matrix"
+#| fig-width: 12
+#| fig-height: 12
+superheat(cor(select(food_fndds, -description, -caffeine, 
+                     -moisture, -alcohol, -theobromine)),
+          heat.pal = c("#F6AE2D", "white", "#18678B"),
+          heat.pal.values = c(0, 0.16, 1),
+          bottom.label.text.angle = 90,
+          bottom.label.size = 0.2,
+          bottom.label.text.size = 4,
+          bottom.label.text.alignment = "right",
+          left.label.size = 0.2,
+          left.label.text.size = 4,
+          left.label.text.alignment = "right",
+          pretty.order.rows = TRUE,
+          pretty.order.cols = TRUE)
+```
+
+The question is, how similar are these groups to the nutrient groups that we identified in the previous section?
+
+### PCS evaluations of correlation matrix
+
+
+#### Predictability
+
+Let's see if the same relationships hold in the Legacy food dataset. This time, however, rather than keeping rows with missing values, we remove them for now since correlations can't be computed for data with missing values. Note that this may introduce bias in the data, but for now we won't worry too much about it (but we will be aware of it).
+
+The groupings seem to be very clear in this Legacy dataset too. 
+
+```{r}
+#| label: fig-cor-heat-legacy
+#| fig-cap: "A heatmap of the correlation matrix"
+#| fig-width: 12
+#| fig-height: 12
+
+food_legacy |>
+  select(one_of(colnames(food_fndds)), -description, -caffeine, 
+         -moisture, -alcohol, -theobromine) |>
+  drop_na() |>
+  cor() |>
+  superheat(heat.pal = c("#F6AE2D", "white", "#18678B"),
+            heat.pal.values = c(0, 0.2, 1),
+            bottom.label.text.angle = 90,
+            bottom.label.size = 0.2,
+            bottom.label.text.size = 4,
+            bottom.label.text.alignment = "right",
+            left.label.size = 0.2,
+            left.label.text.size = 4,
+            left.label.text.alignment = "right",
+            pretty.order.rows = TRUE,
+            pretty.order.cols = TRUE)
+```
+
+
+#### Stability to visualization judgment calls
+
+As a quick stability evaluation, we will arrange the columns and rows of the correlation matrix in the same order as the heatmaps in @fig-heatmap.
+
+
+
+```{r}
+#| label: fig-cor-heat-reorder
+#| fig-cap: "A heatmap of the correlation matrix"
+#| fig-width: 12
+#| fig-height: 12
+superheat(cor(select(food_fndds, -description, 
+                     -caffeine, -moisture, 
+                     -alcohol, -theobromine))[nutrient_order, nutrient_order],
+          heat.pal = c("#F6AE2D", "white", "#18678B"),
+          heat.pal.values = c(0, 0.16, 1),
+          bottom.label.text.angle = 90,
+          bottom.label.size = 0.2,
+          bottom.label.text.size = 4,
+          bottom.label.text.alignment = "right",
+          left.label.size = 0.2,
+          left.label.text.size = 4,
+          left.label.text.alignment = "right")
+```
+
+There are still some very clear nutrient groupings in the heatmap when the nutrients are ordered based on our manual ordering defined above.
+
+#### Stability to pre-processing judgment call
+
+
+The correlations are generally *larger* after log-transforming the nutrient data. The groupings are still there but are a little bit more merged together, with the exception of the vitamins that still seem fairly distinct. 
+
+```{r}
+#| label: fig-cor-heat-log
+#| fig-cap: "A heatmap of the correlation matrix after standardization and log-scaling the nutrients"
+#| fig-width: 12
+#| fig-height: 12
+superheat(cor(select(food_fndds_log_scaled, -description,
+                     -caffeine, -moisture, 
+                     -alcohol, -theobromine)), 
+          heat.pal = c("#F6AE2D", "white", "#18678B"),
+          heat.pal.values = c(0, 0.28, 1),
+          bottom.label.text.angle = 90,
+          bottom.label.size = 0.2,
+          bottom.label.text.size = 4,
+          bottom.label.text.alignment = "right",
+          left.label.size = 0.2,
+          left.label.text.size = 4,
+          left.label.text.alignment = "right",
+          pretty.order.rows = TRUE,
+          pretty.order.cols = TRUE)
+```
+
+
+
+## Defining nutrient groups
+
+
+Based on these plots and our own nutrient domain knowledge, we will define the following groups of nutrients:
+
+
+
+1. **Vitamins**: vitamin C, vitamin B6, vitamin B12, riboflavin, thiamine, folate, niacin, beta carotene, alpha carotene, lutein zeaxanthin, phylloquinone, alpha tocopherol, retinol, lycopene, cryptoxanthin
+
+1. **Fats**: fat, saturated fat, monounsaturated fat, polyunsaturated fat, cholesterol, and all of the fatty acids 
+
+1. **Major minerals**: sodium, potassium, calcium, phosphorus, magnesium, total choline
+
+1. **Trace minerals**: iron, zinc, selenium, copper
+
+1. **Carbohydrates**: carbohydrates, total dietary fiber
+
+1. **Calories**: calories
+
+1. **Protein**: protein
+
+
+We chose to ignore the variables "moisture", "alcohol", "caffeine", and "theobromine", since we deemed these not particularly important for making nutritional dietary choices.
+
+Note that these groupings are very clearly a *judgment call*, and we could certainly have defined them differently!
+
+
+
+## Exploring the relationship between the food items
+
+
+
+The above explorations gave us a vague sense of the relationships between the nutrients (we will try to formalize this in the PCA analysis file), but we don't yet have a sense of the food items themselves.
+
+One way to explore the food items might be to take two nutrient variables (such as sodium and potassium) and visualize the food items in the space defined by these food items.
+
+The points in the sodium-potassium scatterplot in @fig-sodium-potassium-scatter clearly exhibit a large amount of overlap (despite adding transparency with the `alpha` argument), but adding the text of a few food items helps tease apart some relationships in the food items. For instance, it seems that many cheese-related items (high in sodium, moderate in potassium) and fish-related food items (high in both sodium and potassium) are grouped close together. 
+
+We are visualizing the log-transformed standardized data because the points are more spread out in this transformed space and so the trends are slightly easier to pick out.
+
+```{r}
+#| label: fig-sodium-potassium-scatter
+#| fig-cap: "A scatterplot comparing sodium and potassium and overlaying some food items descriptions on top of the plot."
+food_fndds_log_scaled |>
+  ggplot() +
+  geom_vline(xintercept = 0, col = "grey70") +
+  geom_hline(yintercept = 0, col = "grey70") +
+  geom_point(aes(x = sodium, y = potassium),
+             alpha = 0.2, col = "grey50") +
+  geom_text(aes(x = sodium, y = potassium, 
+                label = str_trunc(description, 15)), 
+            check_overlap = TRUE, hjust = 0) 
+```
+
+
+Let's look at a few other pairs of variables too. To make it easy for ourselves, we can define the following reusable function.  Note that the `{{.}}` notation in the function allows us to pass unquoted variable names as arguments in the tidyverse style (this is called "tidy evaluation").
+
+```{r}
+plotNutrientScatter <- function(var1, var2) {
+  food_fndds_log_scaled |>
+    ggplot() +
+    geom_vline(xintercept = 0, col = "grey70") +
+    geom_hline(yintercept = 0, col = "grey70") +
+    geom_point(aes(x = {{ var1 }}, y = {{ var2 }}),
+               alpha = 0.2, col = "grey50") +
+    geom_text(aes(x = {{ var1 }}, y = {{ var2 }}, 
+                  label = str_trunc(description, 15)), 
+              check_overlap = TRUE, hjust = 0)
+}
+```
+
+When we compare fat and vitamin C values, we see groups of fruits/vegetables (high in vitamin C, low in fat), groups of cereals (high in vitamin C and medium in fat), and groups of milk products (low in vitamin C and low in fat - probably these are mostly "fat free" milk products) standing out. 
+
+```{r}
+plotNutrientScatter(fat, vitamin_c)
+```
+
+When we compare alpha carotene and protein, we see meats stand out as high in both, and milk products stand out as notably low in alpha carotene (but varied in protein). 
+
+```{r}
+plotNutrientScatter(alpha_carotene, protein)
+```
+
+## Comparing the FNDDS and Legacy data
+
+If we're going to use the SR legacy food dataset for conducting predictability assessments, we should explicitly compare this dataset to the FNDDS dataset.
+
+A simple check is to compare the distributions of various nutrients. To compare the distributions of protein, fat, and sodium, we use side-by-side boxplots. Overall, the distributions look fairly similar, but are clearly not identical.
+
+These differences could be a difference in the *way* the nutrients are measured, or it could be a difference in the types of food items that are included in each of the datasets.
+
+
+```{r}
+#| label: fig-boxplots
+#| fig-cap: "Boxplots comparing the distribution of various nutrients in the FNDDS and Legacy datasets"
+# generate a vector of common nutrients
+common_vars <- colnames(food_fndds)[colnames(food_fndds) %in% colnames(food_legacy)]
+
+food_common <- rbind(data.frame(dataset = "fndds", food_fndds[, common_vars]),
+                     data.frame(dataset = "legacy", food_legacy[, common_vars]))
+
+gg_box_iron <- food_common |>
+  ggplot() +
+  geom_boxplot(aes(x = dataset, y = iron)) +
+  ggtitle("Iron")
+
+gg_box_protein <- food_common |>
+  ggplot() +
+  geom_boxplot(aes(x = dataset, y = protein)) +
+  ggtitle("Protein")
+
+gg_box_fat <- food_common |>
+  ggplot() +
+  geom_boxplot(aes(x = dataset, y = fat)) +
+  ggtitle("Fat")
+
+gg_box_sodium <- food_common |>
+  ggplot() +
+  geom_boxplot(aes(x = dataset, y = sodium)) +
+  ggtitle("Sodium")
+
+
+(gg_box_protein + gg_box_fat) / (gg_box_iron + gg_box_sodium)
+```
+
+
+
+
+Let's also compare the nutrient values of a few specific food items. For instance, here are the nutrient values of various nonfat Greek yogurt.
+
+```{r}
+food_common |> 
+  filter(str_detect(tolower(description), "yogurt"),
+         str_detect(tolower(description), "greek"),
+         str_detect(tolower(description), "fat"),
+         str_detect(tolower(description), "plain"),
+         str_detect(tolower(description), "low")) |> 
+  transmute(dataset, description = str_trunc(description, 30), 
+            protein, fat, carbohydrates, calories, calcium, sodium) |>
+  arrange(dataset)
+```
+
+
+
+```{r}
+food_common |> 
+  filter(str_detect(tolower(description), "soup"),
+         str_detect(tolower(description), "minestrone"),
+         str_detect(tolower(description), "can")) |> 
+  transmute(dataset, description = str_trunc(description, 30), 
+            protein, fat, carbohydrates, calories, calcium, sodium) |>
+  arrange(dataset)
+```
+
+
+
+```{r}
+food_common |> 
+  filter(str_detect(tolower(description), "pecan"),
+         str_detect(tolower(description), "pie")) |> 
+  transmute(dataset, description = str_trunc(description, 30), 
+            protein, fat, carbohydrates, calories, calcium, sodium) |>
+  arrange(dataset)
+```
+
+
+
+Overall, since we would expect some differences in the food items that people might use our app on and the underlying data in any of these datasets, these differences across the different datasets feel in line with the differences we would expect from the future data that our users would be inputting into our app. 
+
+
+We're going to stop here, but feel free to conduct any additional explorations that occur to you!
