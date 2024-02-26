@@ -1,0 +1,133 @@
+---
+title: "[Data cleaning documentation] <PROJECT NAME>"
+author: Your Name
+format: 
+  html:
+    css: documentation.css
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+editor: source
+number-sections: true
+---
+
+
+Close to the start of each documentation file, you should load the relevant packages/libraries that you will use throughout (so that anyone working through your documentation knows which packages/libraries they will need to install). This template documentation file was created using quarto in RStudio, but you could use Jupyter notebooks or any other software you prefer, ideally so long as it can combine code, output and narrative text in a *reproducible* way. 
+
+
+```{r setup}
+#| label: setup
+#| message: false
+#| warning: false
+
+# load the libraries we will need in this document
+library(tidyverse)
+```
+
+Provide a high-level description of the project.
+
+## Domain problem formulation
+
+Describe the *original* project goal in more detail. Come back and add to this section if the project direction changes, but keep the content about the original goal for reference.
+
+
+## Step 1: Review background information {#sec:bg-info}
+
+
+### Information on data collection 
+
+Provide more information about the data, such as specifics about how it was collected and what is being measured. 
+
+If there is any metadata that provides background information about the data, describe it here and provide stable links (if it is on a website that might change down the line, it is a good idea to save a copy of the page in its current format as a pdf).
+
+If there are any gaps in your understanding of how the data was collected and what it contains, this is a good place to discuss what they are.
+
+Make sure to document anything that you're unsure about, so that you don't forget to check and find answers later. Once you find out answers to any questions you had about the data collection or the data documentation, you can also document that here.
+
+
+### Data dictionary
+
+If you have a data dictionary, print it here or provide a stable link. Discuss anything that you think it is important to point out for future you, or anyone else who might want to work with this data.
+
+
+## Step 2: Load the data
+
+This section might be as simple as one line of code loading a CSV into your environment, or it may be as complex as:
+
+- Extracting your data from where it lives, such as a database or data repository.
+- Combining multiple data tables using a common key variable.
+- Filtering your data to just the relevant information.
+
+You should check that your data was loaded correctly by 
+
+
+- Looking at the first 10 rows of your data to confirm that it looks correct.
+- Check that the dimension of your data matches what you expect.
+
+
+
+## Step 3: Examine the data
+
+This is a good place to print out some random rows of groups in your data to get a clearer sense of what it looks like. If you haven't already printed out the first few rows (the head) of your data, this is a good place to do that.
+
+You might want to include the following subsections (and feel free to add some more)
+
+In this section, you will likely specify some cleaning tasks, some of which will involve several alternative judgment calls that you could implement. Be sure to document these.
+
+
+
+
+
+### Invalid values
+
+Conduct some explorations to check whether there are any invalid or "impossible" values in each column of your data.
+
+
+
+
+### Missing values
+
+Conduct a thorough exploration of the patterns of missingness in your data. Identify how missing values are stored, if there are
+
+
+### Data format
+
+Is your data in a tidy format? While it will depend on your particular dataset, typically the easiest format to work with is the "tidy" format where
+
+
+- Each *row* should correspond to the data for a *single observational unit* (if the data for a single observational unit is spread across multiple rows, most algorithms will treat these as different observational units). 
+
+- Each column corresponds to a single type of measurement. 
+
+To identify whether your data is tidy, you need to identify what the observational units are (e.g., people, houses, food items). Is information for a single observational unit split across different rows? 
+
+Do you need to "pivot" the data into a longer or wider format?
+
+### Column names
+
+Print out your column names. Do they make sense? Do they follow a consistent format, such as `camel_case`? Functions like `clean_names()` from the `janitor` package in R will make cleaning your columns name format very easy.
+
+
+### Variable type
+
+Identify whether any variables should to be converted to another type (e.g., if your data contains ordered categorical variables, you might want to convert them to numeric variables)
+
+
+### Data specific explorations
+
+There will be some explorations and evaluations that you will want to perform that will be specific to the particular dataset you're working with. 
+
+
+## Step 4: Clean the data
+
+Implement the cleaning tasks that you proposed in the sections above. 
+
+Ideally this will involve first writing a re-usable *function* whose arguments correspond to the various judgment calls that you made. This makes it very easy to create several different versions of your data for downstream PCS analysis. You can save your data cleaning function in a separate R script so that you can access it outside this document, but it is a good idea to print the contents of your cleaning R script here too. At the very least, you should summarize the cleaning steps that are implemented in the cleaning script. 
+
+You will then typically apply your cleaning function separately to the training, validation, and test data if you are splitting your data as such.
+
+
+
+
+

@@ -1,0 +1,28 @@
+---
+title: "[Analysis documentation] <PROJECT NAME>"
+author: Your Name
+format: 
+  html:
+    css: documentation.css
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+    df-print: kable
+editor: source
+number-sections: true
+---
+
+At the start of each documentation file, you should load the relevant packages that you will use throughout. This template documentation file was created using quarto in RStudio, but you could use Jupyter notebooks or any other software you prefer, ideally so long as it can combine code, output and narrative text.
+
+
+```{r setup}
+#| label: setup
+#| message: false
+#| warning: false
+
+
+# load the libraries we will need in this document
+library(tidyverse)
+```
+

@@ -1,0 +1,83 @@
+---
+title: "[EDA documentation] <PROJECT NAME>"
+author: Your Name
+format: 
+  html:
+    css: documentation.css
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+    df-print: kable
+editor: source
+number-sections: true
+---
+
+
+
+
+The format of the EDA documentation is a lot more flexible than the data cleaning format, since every project will have very different exploratory avenues. We recommend you start with some general exploratory plots to summarize the important variables in the data, and go from there. You will likely want to finish with a section that generates some more polished explanatory plots. 
+
+
+At the start of each documentation file, you should load the relevant packages that you will use throughout. This template documentation file was created using quarto in RStudio, but you could use Jupyter notebooks or any other software you prefer, ideally so long as it can combine code, output and narrative text.
+
+
+```{r setup}
+#| label: setup
+#| message: false
+#| warning: false
+
+
+# load the libraries we will need in this document
+library(tidyverse)
+```
+
+
+
+## Load and clean the data
+
+Since this EDA document may work with both the original and cleaned data, we suggest that you load your data (perhaps just your training data if you're only working with that) and clean it using your cleaning function *within* this document, for maximum reproducibility.
+
+```{r}
+#| eval: false
+
+# load in the original data
+data_orig <- read_csv("data_file.csv")
+# clean the data
+data_clean <- cleanData(data_orig)
+```
+
+We *strongly* encourage conducting explorations on both the original uncleaned version of the data (as well as the cleaned version). Thoroughly exploring the uncleaned data may reveal surprising features of your raw data that may motivate updating your cleaning script (remember that the data science life cycle is iterative - it's perfectly fine to go back to an earlier stage).
+
+On the other hand, it is also important to explore the clean data too, since this is the data that you will be working with for your downstream analysis and will likely be using to create your explanatory figures and tables. 
+
+
+
+## Summarizing the data
+
+
+Here, you will visualize your data in a general way. Some examples of plots and tables that might be useful are
+
+- A table reporting the min, max, and average of each numeric variable
+
+- Histograms or boxplots of continuous numeric variables (perhaps separating the data into meaningful groups)
+
+- Bar charts for discrete variables
+
+- A scatterplot to show the relationships between a few select pairs of variables (or a scatterplot matrix, if you're into those)
+
+- Anything else you want to look at
+
+
+
+## Specific explorations and questions
+
+Typically the process of EDA involves asking questions of the data (such as "what is the distribution of the sale price variable" or "how does sale price relate to living area"), and creating plots and "summary statistics" (such as averages and correlations) to answer the questions that you ask.
+
+This section (which may be split into multiple sections if you have various different exploratory avenues) can correspond to a particular exploratory avenue.
+
+
+## Explanatory plots
+
+Here you can create the polished explanatory figures that you might want to include in a final report or a presentation. 
+
