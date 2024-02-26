@@ -1,0 +1,8 @@
+- source: 01_cleaning_documentation_template.qmd
+  quarto-pub:
+    - id: c3a832af-14a9-45ac-91a1-63188878bef7
+      url: 'https://quartopub.com/sites/rlbarter/vds_leaning'
+- source: 02_eda_documentation_template.qmd
+  quarto-pub:
+    - id: dcb54a8f-a23b-45cc-b8d9-917f84c01ca0
+      url: 'https://quartopub.com/sites/rlbarter/vds-eda'
