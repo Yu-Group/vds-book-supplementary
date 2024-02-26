@@ -1,0 +1,31 @@
+---
+title: "Exploring the smartphone activity data"
+subtitle: "[DSLC stages]: EDA"
+format: 
+  html:
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+    df-print: kable
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+---
+
+
+We examined and cleaned the smartphone activity data in the file `01_cleaning.qmd`. In this document, you will conduct your own an EDA of the smartphone activity data. 
+
+You'll want to start by loading some libraries, loading the data and cleaning and pre-processing it using the relevant functions.
+
+
+
+## High-level summary of the data
+
+Conduct a high-level summary of the data. For example, you may want to look at some histograms and scatterplots. 
+
+## Other explorations
+
+Create some sections that involve a question-answer exploration, keeping the overall project in mind as you go.

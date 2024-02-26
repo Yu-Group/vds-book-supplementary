@@ -1,0 +1,165 @@
+---
+title: "Preparing the smartphone activity data"
+subtitle: "[DSLC stages]: Data cleaning and pre-processing"
+format: 
+  html:
+    toc: true
+    toc-location: right
+    number-depth: 4
+    theme: cerulean
+    df-print: kable
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+Let's start by loading in the libraries that we will use in this document (if you want to use more libraries as you fill in this document, you can add them here).
+
+```{r setup}
+#| label: setup
+#| message: false
+#| warning: false
+
+# load the libraries we will need in this document
+library(tidyverse)
+library(janitor)
+```
+
+
+## Domain problem formulation
+
+Write about the project.
+
+
+## Data source overview
+
+Write about where the data came from and how it was collected
+
+## Step 1: Review background information {#sec:bg-info}
+
+
+### Information on data collection 
+
+
+Talk about what information has been provided
+
+### Data dictionary
+
+Fill in information from the data dictionary.
+
+### Answering questions about the background information
+
+
+- *What does each variable measure?* 
+
+- *How was the data collected?* 
+
+- *What are the observational units?* 
+
+- *Is the data relevant to my project?* 
+
+
+
+## Step 2: Loading the data
+
+Since this data in its raw format is quite complex, loading a workable version of the data into our environment will involve loading and combining multiple different tables, and filtering to the relevant portion of the combined dataset.
+
+
+### Combining the files into a single dataset
+
+```{r}
+#| message: false
+#| warning: false
+
+
+measurements_train_orig <- read_table("../data/train/X_train.txt", 
+                                      col_names = FALSE)
+# read in the column names
+column_names <- read_table("../data/features.txt", 
+                           col_names = FALSE)
+# add column names to the measurements data
+colnames(measurements_train_orig) <- column_names$X2
+# use janitor's clean_names() to handle a lot of the column names issues
+# (such as repeated column names, dashes, and parentheses, etc) 
+measurements_train_orig <- clean_names(measurements_train_orig)
+
+# load the subject ID variable
+subject_id <- read_table("../data/train/subject_train.txt", col_names = FALSE)
+measurements_train <- measurements_train_orig |>
+  mutate(id = subject_id$X1)
+# place id first
+measurements_train <- measurements_train |> select(id, everything())
+```
+
+Now let's take a quick look at the `measurements_train` data object. 
+
+To check that the data has been loaded in correctly, let's first look at the first 6 rows:
+
+```{r}
+head(measurements_train)
+```
+
+And then the dimension (notice that there are more than 500 columns!):
+
+```{r}
+dim(measurements_train)
+```
+
+
+## Step 3: Examine the data
+
+In this section we explore the common messy data traits to identify any cleaning action items.
+
+### Invalid values
+
+### Missing values
+
+### Data format
+
+
+### Column names
+
+
+
+### Variable type
+
+### Incomplete data
+
+## Step 4: Clean the data
+
+Now we implement the cleaning action items that we proposed in the sections above. We will write a single `prepareActivityData()` function to both clean and pre-process the data.
+
+
+### The data preparation function
+
+
+```{r}
+#| file: R/prepareActivityData.R
+```
+
+
+### Creating the cleaned data
+
+This cleaning function can then be used to clean the data in subsequent analysis documents as follows:
+
+
+```{r}
+#| message: false
+#| warning: false
+
+# source the cleaning function code
+source("R/prepareActivityData.R")
+# load in all of the raw data objects
+
+
+# create the clean dataset
+
+# look at the cleaned data object
+
+```
+

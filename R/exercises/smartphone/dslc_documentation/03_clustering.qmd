@@ -1,0 +1,25 @@
+---
+title: "Applying cluster analysis to the smartphone activity data"
+subtitle: "[DSLC stages]: Analysis""
+format: 
+  html:
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+    df-print: kable
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+---
+
+
+
+In this document, you will conduct a cluster analysis on the smartphone actiivity data. 
+
+You'll want to start by loading some libraries, loading the data and cleaning and pre-processing it using the relevant functions.
+
+
+
