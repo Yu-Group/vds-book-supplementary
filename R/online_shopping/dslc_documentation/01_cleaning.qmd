@@ -1,0 +1,478 @@
+---
+title: "[Chapter 11] Cleaning the Online Shopping data"
+subtitle: "[DSLC stages]: Data cleaning and pre-processing"
+format: 
+  html:
+    css: documentation.css
+    toc: true
+    toc-location: right
+    number-depth: 4
+    theme: cerulean
+    df-print: kable
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+Let's start by loading in the libraries that we will use in this document.
+
+```{r setup}
+#| label: setup
+#| message: false
+#| warning: false
+
+# load the libraries we will need in this document
+library(tidyverse)
+library(lubridate)
+library(janitor)
+library(fastDummies)
+```
+
+
+## Domain problem formulation
+
+
+Our goal for this project is to develop a predictive algorithm for predicting the purchase intent of user sessions on an e-commerce website. Our intention is to use the algorithm we develop to predict which use sessions to the same e-commerce site are likely to end in a purchase in the years immediately following the data period.
+
+
+## Data source overview
+
+
+The *Online Shoppers Purchasing Intention* dataset was collected by Sakar et al. and can be downloaded from the [UCI Machine Learning repository](https://archive.ics.uci.edu/ml/datasets/Online+Shoppers+Purchasing+Intention+Dataset).
+
+
+## Step 1: Review background information {#sec:bg-info}
+
+
+### Information on data collection 
+
+We unfortunately don't know a whole lot about how the data were collected. All that we do know is from the [UCI Machine Learning repository]((https://archive.ics.uci.edu/ml/datasets/Online+Shoppers+Purchasing+Intention+Dataset#)) itself and the paper written by Sakar et al.'s 2009 [paper](https://link.springer.com/article/10.1007/s00521-018-3523-0) titled "Real-time prediction of online shoppers' purchasing intention using multilayer perceptron and LSTM recurrent neural networks". 
+
+
+
+### Data dictionary
+
+The features (in terms of the cleaned columns names) for each user session include a set of variables describing the number and type of pages each user visited in their session, and the amount of time they spend on each type of page:
+
+- `Administrative`: the number of administrative-type pages that the user visited during the session.
+
+- `Administrative_Duration`: the length of time (in seconds) that the user spent on administrative pages during their session.
+
+- `Informational`: the number of informational-type pages that the user visited during the session.
+
+- `Informational_Duration`: the length of time (in seconds) that the user spent on informational pages during their session.
+
+- `ProductRelated`: the number of product-related-type pages that the user visited during the session.
+
+- `ProductRelated_Duration`: the length of time (in seconds) that the user spent on product-related pages during their session.
+
+Next, there are a set of features collected from Google Analytics [@clifton_advanced_2012]. 
+
+- `BounceRates`: the average bounce rate value of the pages visited during the session. For a specific web page, the *bounce rate* is the percentage of users who enter the site from that page and then leave ("bounce") without triggering any other requests to the analytics server during their session.
+
+- `ExitRates`:  the average exit rate value of the pages visited during the session. For a specific web page, the *exit rate* is the proportion of page views to the page, that were the last in the session. 
+
+- `PageValues`: the average page value of the pages visited during the session. The *page value* for a web page gives an idea of how much each page contributes to the site's revenue. 
+
+- `OperatingSystems`: the operating system that the user was using for the session. The operating systems are coded as integers.
+
+- `Browser`: the web browser that the user was using for the session. The browsers are coded as integers.
+
+- `Region`: the geographic region in which the user is located for their session. The regions are coded as integers.
+
+- `TrafficType`: the source of the referral for the session (how did the user arrive at the site?), examples include an advertisement banner, an SMS link, direct URL. The traffic types are coded as integers.
+
+- `VisitorType`: a categorical variable that specifies whether the session corresponded to a `"New_Visitor"`, a `"Returning_Visitor"`, or `"Other"` (whatever "other" means). 
+
+Then there are also several features corresponding to the date.
+
+- `SpecialDay`: a numeric value between 0 and 1 indicating how closeness the site visiting time is to a "special day" (such as Mother's day, Valentine's day), in which the sessions are - hypothetically - more likely to be finalized with a transaction. The value of this attribute is determined by considering the dynamics of e-commerce such as the duration between the order date and delivery date. For example, for Valentine’s day, `special_day` takes a nonzero value between February 2 and February 12, achieving the maximum value of 1 on February 8 (6 days before Valentine's day).
+
+- `Month`: the month in which the session took place.
+
+- `Weekend`: a binary variable corresponding to whether the session occurred on a weekend or a weekday.
+
+Finally, there is the response variable that we are interested in predicting:
+
+- `Revenue`: the **response variable** corresponding to whether a purchase was made during the session. (We will change the name of this feature to `purchase` below.)
+
+
+### Answering questions about the background information
+
+In this section, we will go through the recommended background information questions from the Data Cleaning chapter.
+
+- *What does each variable measure?* Most of the information in the data dictionary is fairly self-explanatory. We did some Googling to understand the Google Analytics variables, many of which involve aggregate measurements across many all sessions (which was confusing because they are different numbers for each session). It turns out that each page has an associated "bounce rate", for example, and an individual *session's* bounce rate corresponds to the *average* bounce rate across *all pages* that were visited in the session (similarly for the "exit rate" and "page values" etc). Some useful information can be found [here](https://support.google.com/analytics/answer/2695658?hl=en&ref_topic=6156780).
+
+- *How was the data collected?* We unfortunately don't have a whole lot of information about where the data came from, and which online shop it corresponds to. (We emailed the authors of the data requesting additional background information and did not hear back.)
+
+- *What are the observational units?* The observational units are the individual user sessions.
+
+- *Is the data relevant to my project?* Since we defined our project goal narrowly as generating predictions for sessions to the same e-commerce store in the years immediately following the period covered by the data, the data is relevant to our project. But since we know so little about the data and even what type of e-commerce store it corresponds to, the data is not particularly relevant outside of this very narrow scope. 
+
+
+
+## Step 2: Loading the data
+
+Fortunately the data consists of only one single `.csv` file, so loading it is very easy:
+
+```{r}
+shopping_orig <- read_csv("../data/online_shoppers_intention.csv")
+```
+
+Let's look at the first few rows to make sure it looks like it has been loaded in correctly:
+
+```{r}
+head(shopping_orig) |>
+  print(width = Inf)
+```
+
+It looks like the data is in a reasonable format, but we already notice something strange: the third entry has negative entries for the `Administrative_Duration`, `Informational_Duration`, and `ProductRelated_Duration`  features (how can a duration be negative?).  Let's make a note to check this out (we will certainly cover it in our invalid values explorations)!
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Question: Why are there negative "duration" entries?**
+:::
+Ensure that the data only contains `Sale Condition == "Normal"` and `MS.Zoning` is not equal to any of `"A (agr)", "C (all)", "I (all)"`
+::::
+
+
+And let's examine the dimension of the data. 
+
+```{r}
+dim(shopping_orig)
+```
+
+
+This matches what is written on the UCI Machine Learning repository. 
+
+
+
+### Filtering to the relevant portion of the data
+
+As far as we are concerned, all of the data are relevant. 
+
+
+## Step 3: Examine the data
+
+In this section we explore the common messy data traits to identify any cleaning action items.
+
+
+### Invalid values
+
+Recall from above that there were some surprising negative values in the `_Duration` features. Let's see if this reoccurs in some randomly selected rows of the data. 
+
+```{r}
+set.seed(874)
+shopping_orig |>
+  sample_n(10) |>
+  print(width = Inf)
+```
+
+Nothing in this sample seems odd so far.  Let's do some explorations of the individual variables. 
+
+#### Numeric variables
+
+
+To explore the validity of the values in the numeric variables, we will first look at the min, max, and mean for each column. The only variables that seem to have surprising max/min values is the `_Duration` variables, which we already noticed.
+
+```{r}
+#| label: tbl-shopping-summary
+shopping_orig |>
+  select_if(is.numeric) |>
+  map_df(~tibble(min = min(., na.rm = TRUE),
+                 max = max(., na.rm = TRUE),
+                 mean = round(mean(., na.rm = TRUE), 2)),
+         .id = "variable") 
+```
+
+It is also clear that there are several variables that would be much better coded as categorical (such as `OperatingSystems`, `Browser`, etc), but we will handle that when we address the variable formats below. 
+
+
+To see how prevalent these negative duration values are, we can count the number of negative durations that occur:
+
+```{r}
+shopping_orig |>
+  select(Administrative_Duration, 
+         Informational_Duration, 
+         ProductRelated_Duration) |>
+  summarise_all(~sum(. < 0, na.rm = T))
+```
+
+It seems that there are 33 sessions with negative durations in the entire dataset (this is less than 0.3% of all sessions). Notice also that when there is a negative duration for one of the three duration variables, the other two are also negative.
+
+```{r}
+shopping_orig |>
+  filter(Administrative_Duration < 0) |>
+  print()
+```
+
+
+What should we do about these negative values. Since they are so rare, they are unlikely to cause any issues in our algorithm, regardless of whether we leave them as they are, replace them with negative values (to later impute them) or remove the rows entirely. However, so that we are consistent with our definition of clean data (that recommends replacing invalid values with missing values), let's replace them with `NA`s
+
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Data cleaning: Replace negative duration entries with NA**
+:::
+Since it doesn't make sense to have a negative duration value, we will replace these negative entries with missing values (`NA`). Alternative judgment calls include leave them as they are, or removing the rows with negative duration entries (but the other measurements in these rows seem to be reasonable, so we won't recommend this last option).
+::::
+
+
+
+Looking at the other numeric variables, since it can be hard to tell if the maximums and minimums are reasonable in general, it is often helpful to visualize the distribution of each numeric variable using a histogram:
+
+```{r}
+#| label: fig-shopping-dist
+#| fig-cap: "Histograms showing the distribution of each variable"
+#| fig-height: 18
+#| warning: false
+#| message: false
+shopping_orig |>
+  select_if(is.numeric) |>
+  pivot_longer(everything(), names_to = "variable") |>
+  ggplot() +
+  geom_histogram(aes(x = value), col = "white") +
+  facet_wrap(~variable, scales = "free", ncol = 2)
+```
+
+
+Nothing here looks odd (except we note that the `SpecialDay` variable is not a binary variable but takes a value between 0 and 1, apparently to represent the "closeness" to a special day, with most values being equal to 0). 
+
+
+
+
+#### Categorical variables
+
+Next, we will look at the unique values of each categorical value. The following code prints out the unique values for each variable as a list (there are only two variables `Month` and `VisitorType`). 
+
+
+```{r}
+shopping_orig |>
+  # select just the character variables
+  select(where(is.character)) |> 
+  # for each variable (map), print out the number of times each value appears (table)
+  map(table)
+```
+
+Notice that there are fewer months than expected. The months of January and April are missing entirely from the data (we looked at the raw data file to confirm that we had not just loaded in the data incorrectly). We could not find an explanation as to why this might be the case, however. 
+
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Question: Why are January and April absent from the data?**
+:::
+There are no sessions recorded for these months at all. We couldn't find an explanation as to why this is the case.
+::::
+
+In addition, we don't know what it means when `VisitorType` is equal to "Other" (how can someone neither be new nor returning?). Since there are so few "Other" `VisitorType` entries, that it would likely be simpler to convert the `VisitorType` variable to a binary variable for whether the visitor is a new visitor or not (where "not" encompasses returning visitor and other). This isn't necessary for the data to be clean, however, so it is a pre-processing step rather than a cleaning step.
+
+
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Pre-processing action item: Convert `VisitorType` to a binary variable that is 1 (new visitor) or 0 (other or returning visitor)**
+:::
+This is because there are so few "other" entries, it doesn't make sense to create dummy variables for this level (which we will have to do to use this variable in a predictive algorithm that only allows numeric entries). 
+::::
+
+
+
+Since we plan to convert the `Browser`, `OperatingSystems`, and `TrafficType` variables to categorical formats, let's also take a look at them.
+
+
+
+```{r}
+shopping_orig |>
+  # select just the character variables
+  transmute(Browser = as.factor(Browser),
+            OperatingSystems = as.factor(OperatingSystems),
+            TrafficType = as.factor(TrafficType)) |> 
+  # for each variable (map), print out the number of times each value appears (table)
+  map(table)
+```
+
+
+
+Notice that for each of these variables there are some levels a few very few observations in them. We are thus likely to later run into the issue, e.g., of levels appearing in the validation set but not in the training set. Thus we will add an additional pre-processing step:
+
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Pre-processing action item: For all categorical variables for which a level has few observations in it in the original data (using a threshold of 50 observations), combine the rare levels into an "other" category**
+:::
+Combine categorical levels with fewer than 50 observations (for the training set) into an "other" category. For the validation and test sets, create the same levels as were created for the training set (rather than using this thresholding rule).
+::::
+
+
+
+
+
+
+### Missing values
+
+
+Let's count the proportion of missing (`NA`) values in each column. There are a few rows with missing values, but this amounts to around 14 (0.1% of all) rows, which is very few.
+
+```{r}
+shopping_orig |>
+  # for each column, count the number of missing values
+  map_dbl(~sum(is.na(.))) |>
+  # arrange them in decreasing order
+  sort(decreasing = TRUE)
+```
+
+To decide what to do about these rows, we will check to see if they tend to occur in the same rows:
+
+```{r}
+shopping_orig |>
+  filter(is.na(Administrative)) |>
+  as.data.frame()
+```
+
+Indeed, it is one set of 14 observations that have missing values for all of these variables. And there is something else interesting too: *they all took place in March.* 
+
+While we don't know this to be the case, there might have been some kind of system failure that briefly occurred leading to the missing values for a few observations. Since so many of the measurements for these observations/rows are missing (and since there are only 14 such rows), rather than imputing them when pre-processing the data, we will opt to instead remove these 14 rows.
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Pre-processing action item: Remove the 14 rows with missing values**
+:::
+Since the 14 rows with missing values are missing values for so many of the variables, and since there are only 14 of them, we decide to remove these rows from the data before training our predictive fits. An alternative judgment call is to impute them with 0, but this is unlikely to matter much since it affects so few rows.
+::::
+
+
+
+
+
+### Data format
+
+
+The data is already in a "tidy" format, where each row corresponds to the data for a single observational unit, and each column corresponds to a unique type of measurement. 
+
+
+### Column names
+
+The column names need to be cleaned in order to conform to our tidy column name requirements of words in column names being underscore-separated and lowercase. For instance, we would like to rename `ProductRelated_Duration` to be `product_related_duration`.
+
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Data cleaning action item: Clean the column names**
+:::
+Rename the columns so that they are consistently formatted, with underscore-separated words and human readable. We will automate this process using the `clean_names()` function from the `janitor` R package.
+::::
+
+
+### Variable type
+
+The code below prints the type/class of each variable, each of which seems to be a character or an integer.
+
+```{r}
+shopping_orig |>
+  map_df(~tibble(class = class(.)), 
+         .id = "variable") |>
+  arrange(class) |>
+  as.data.frame()
+```
+
+
+
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Data cleaning action item: Convert the `OperatingSystems`, `Browser`, `Region`, and `TrafficType` numeric variables to factors**
+:::
+Since these variables are obviously supposed to be categorical, we will convert them to a categorical format. However, an alternative judgment call is to leave them in their numeric format (which doesn't feel intuitive, but it will be interesting to see how this decision affects predictive performance--perhaps there is some ordering to the entries that we don't know about). 
+::::
+
+It also seems intuitive to convert the `Month` variable to a numeric variable, however the categorical option makes sense too. Since it does not feel necessary to convert `Month` to a numeric variable (rather we are curious if it will improve our down-stream predictive performance), we will include it as a pre-processing step, rather than a data cleaning step.
+
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Pre-processing action item: Convert the `Month` variable to a numeric type**
+:::
+Since the month are ordered, it makes sense to convert it to a numeric variable. An alternative judgment call is to keep it as a categorical variable (which will then have to be converted into dummy variables later during pre-processing).
+::::
+
+
+
+
+
+
+### Incomplete data
+
+Since we don't have a list of all sessions for the e-commerce site, we don't know if the data is complete. Are the sessions from January and April missing because there were none (e.g., maybe the site was down), or are they just missing from the data. Unfortunately without any additional information, there is nothing we can do about this.
+
+
+
+## Step 4: Clean and pre-process the data
+
+Now we implement the cleaning and pre-processing action items that we proposed in the sections above. Since the cleaning and pre-processing action items feel very inter-related, we will write a single `prepareShoppingData()` function, rather writing two separate functions.
+
+
+The default action items include:
+
+- Clean the column names.
+
+- Replace the negative duration values with `NA`.
+
+- Convert the `OperatingSystems`, `Browser`, `Region`, and `TrafficType` numeric variables to factors.
+
+
+We also included optional pre-processing action items (as arguments):
+
+- Convert durations from seconds to minutes.
+
+- Convert `VisitorType` to a binary variable that is 1 (new visitor) or 0 (other or returning visitor).
+
+- Adding an option to remove the 14 rows with missing values (alternative judgment call: impute the missing values instead).
+
+- For all categorical variables for which a level has few observations in it in the original data (using a threshold of 50 observations), combine the rare levels into an "other" category.
+
+- Convert the `Month` variable to a numeric type.
+
+- Convert categorical variables to dummy variables.
+
+- Remove the extreme observations with very large numbers of pageviews, that may be bots.
+
+- Applying a log-transformation to several of the predictor variables.
+
+
+
+Alternative judgment calls for each of these action items is to *not* implement them.
+The cleaning/preprocessing "preparation" function is shown below and is saved in the file "functions/prepareShoppingData.R". At the end of this file, the data is split into training, validation, and test sets and each dataset is prepared using the `prepareShoppingData()` function.
+
+```{r}
+#| file: functions/prepareShoppingData.R
+```
+
+This code can be run in downstream `qmd` files using 
+
+```{r}
+source("functions/prepareShoppingData.R")
+```
+
+To confirm that our split did what we expect:
+
+```{r}
+# check the size of each dataset
+dim(shopping_train_preprocessed)
+dim(shopping_val_preprocessed)
+dim(shopping_test_preprocessed)
+```
+
+
+
+```{r}
+# check the size of each dataset
+head(shopping_train_preprocessed)
+head(shopping_val_preprocessed)
+head(shopping_test_preprocessed)
+```
+

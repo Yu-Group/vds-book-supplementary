@@ -1,0 +1,570 @@
+---
+title: "[Chapter 12] Predicting online shopping purchase intent using CART and RF"
+subtitle: "[DSLC stages]: Analysis"
+format: 
+  html:
+    css: theme.css
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+In this document, you will find the PCS workflow and code for fitting the CART and RF algorithms to the online shopping data.
+
+
+The following code sets up the libraries and creates cleaned and pre-processed training, validation and test data that we will use in this document.
+
+```{r}
+#| message: false
+#| warning: false
+library(patchwork)
+library(lubridate)
+library(scales)
+library(yardstick)
+library(fastDummies)
+library(tidyverse)
+library(janitor)
+library(rpart)
+library(ranger)
+# apply the cleaning and pre-processing functions
+source("functions/prepareShoppingData.R")
+# list all objects (and custom functions) that exist in our environment
+ls()
+
+```
+
+
+Since CART and RF can both use categorical features directly, we will primarily use the version of the shopping data with the original categorical variables (i.e., without dummy variables) `shopping_train_preprocessed_nodummy` (this is created when we run the `prepareShoppingData.R` script).
+
+
+
+## A manual CART demonstration
+
+In this section, we will demonstrate one example of manually compute the first CART split for a small sample of 30 training sessions.
+
+First, let's create the sample of 30 training sessions (8 that ended with a purchase and 22 that did not).
+
+
+
+```{r}
+# prepare the sample data points so that they match the sample in the book
+shopping_train_sample <- shopping_train[c(6529, 1278, 3304, 604,  
+                                          287, 6780, 1799, 2088,
+                                          7188, 4690, 3892, 3347,
+                                          581, 6910, 2108, 5081, 
+                                          1626, 2487, 3931, 2078,
+                                          6192, 6527, 5814, 1534,
+                                          7205, 6356, 5043, 1973, 
+                                          694, 2258), ] %>%
+  preprocessShoppingData() |>
+  select(product_related_duration, exit_rates, purchase)
+```
+
+Then, we can create a tibble with the set of potential split questions (each defined based on a variable and a threshold or value) we will consider for this small example:
+
+
+```{r}
+questions <- tribble(~variable, ~value,
+                     "exit_rates", 0.010,
+                     "exit_rates", 0.025,
+                     "exit_rates", 0.031,
+                     "product_related_duration", 8.41,
+                     "product_related_duration", 3.85,
+                     "product_related_duration", 15.92)
+
+```
+
+And define a function for computing the Gini split measure for each split option.
+
+```{r}
+getGini <- function(variable, value) {
+  yes <- shopping_train_sample[[variable]] < value
+  purchase <- parse_number(as.character(shopping_train_sample$purchase))
+  gini_yes <- 1 - (sum(purchase[yes]) / sum(yes))^2 - (1 - sum(purchase[yes]) / sum(yes))^2
+  
+  gini_no <-  1 - (sum(purchase[!yes]) / sum(!yes))^2 - (1 - sum(purchase[!yes]) / sum(!yes))^2
+  
+  gini <- sum(yes) / length(yes) * gini_yes + sum(!yes) / length(yes) * gini_no 
+  
+  
+  return(tibble(split = paste0(variable, " < ", value),
+                gini = round(gini, 2)))
+}
+
+```
+
+
+Then we can apply this function to the set of potential split questions
+
+```{r}
+map2_df(questions$variable, questions$value, function(.x, .y) getGini(.x, .y))
+```
+
+
+
+and we see that the split question, `exit_rates < 0.01` yields the lowest variance for these 30 training sessions, and so this is the threshold rule that we will use to define the first split.
+
+
+Fortunately, you wouldn't have to do this manually yourself, since the `rpart()` function will do it for you (although it will consider a much broader range of split options than the set that we considered above). Below, you can see that the `rpart()` function similarly identifies `exit_rates < 0.01` as the best split option (the first split corresponds to entry 2).
+
+```{r}
+# set a parameter that allows to have smaller node splits than the default
+prune_control = rpart.control(minsplit = 1)
+shopping_example_cart <- rpart(purchase ~ product_related_duration + exit_rates, 
+                               shopping_train_sample,
+                               control = prune_control)
+shopping_example_cart
+```
+
+
+
+
+## Fitting CART and RF using the entire training set
+
+Below, we fit a CART algorithm using the entire training dataset using all of the available features.
+
+
+```{r}
+cart <- rpart(purchase ~ ., 
+              shopping_train_preprocessed_nodummy)
+```
+
+
+We can also fit a RF algorithm using the entire training dataset and all available features using the `ranger()` function from the ranger R package.
+
+```{r}
+set.seed(2783)
+rf <- ranger(purchase ~ ., 
+             shopping_train_preprocessed_nodummy,
+             probability = TRUE)
+```
+
+
+
+## RF variable importance
+
+
+To extract the variable importance from the RF fit, you actually need to specify an `importance` argument when you train the RF algorithm.
+
+The code below retrains the RF algorithm to extract the permutation and the impurity importance measures.
+
+```{r}
+set.seed(2783)
+rf_permutation <- ranger(purchase ~ ., 
+                         probability = TRUE,
+                         shopping_train_preprocessed_nodummy, 
+                         importance = "permutation")
+set.seed(2783)
+rf_impurity <- ranger(purchase ~ ., 
+                      probability = TRUE,
+                      shopping_train_preprocessed_nodummy, 
+                      importance = "impurity")
+
+```
+
+Then the importance measure values for each variable can be extracted directly from the rf objects:
+
+```{r}
+rf_permutation$variable.importance
+rf_impurity$variable.importance
+```
+
+
+And we can visualize these importance measures using a bar plot:
+
+```{r}
+# put the two importance measures in a tibble
+tibble(variable = names(rf_permutation$variable.importance),
+       permutation = rf_permutation$variable.importance,
+       impurity = rf_impurity$variable.importance) |>
+  # arrange in order of the impurity measure
+  arrange(impurity) |>
+  # ensure that the variable names will appear in the correct order by fixing the factor level order
+  mutate(variable = fct_inorder(variable)) |>
+  # convert to a longer format so we can use facet_wrap 
+  pivot_longer(c("permutation", "impurity"), 
+               names_to = "measure",
+               values_to = "importance") |>
+  ggplot() +
+  # create bar plot
+  geom_col(aes(x = variable, y = importance)) +
+  # create a separate plot for each measure
+  facet_wrap(~measure, ncol = 1, scales = "free") +
+  # switch the x- and y-axes
+  coord_flip() +
+  theme_bw()
+```
+
+
+
+
+
+
+## A PCS evaluation of the CART and RF fits
+
+And we can then evaluate the predictability and stability of this CART fit!
+
+### Predictability
+
+Let's evaluate the CART fit using the validation set. This will involve generating validation set predictions, which we can then compare to the original logistic regression fit.
+
+First, let's create a version of the original LS fit
+
+```{r}
+lr_all <- glm(factor(purchase, levels = c(0, 1)) ~ ., 
+              shopping_train_preprocessed, 
+              family = "binomial")
+```
+
+Then we can put both our CART and LS predictions into a data frame (tibble).
+
+```{r}
+val_performance <- 
+  tibble(true = shopping_val_preprocessed$purchase,
+         pred_lr_all = predict(lr_all, shopping_val_preprocessed, type = "response"),
+         pred_cart = predict(cart, shopping_val_preprocessed_nodummy)[, 1],
+         pred_rf = predict(rf, shopping_val_preprocessed_nodummy)$prediction[, 1])
+```
+
+And we can evaluate the performance of each fit, and format the results in the table below:
+
+```{r}
+val_performance |>
+  pivot_longer(c("pred_lr_all", "pred_cart", "pred_rf"),
+               names_to = "fit", values_to = "pred", names_prefix = "pred_") |>
+  mutate(pred_binary = factor(as.numeric(pred > 0.161), levels = c(1, 0))) |>
+  group_by(fit) |>
+  summarise(accuracy = accuracy_vec(true, pred_binary),
+            tp_rate = sens_vec(true, pred_binary),
+            tn_rate = spec_vec(true, pred_binary),
+            auc = roc_auc_vec(true, pred)) |>
+  arrange(auc)
+```
+
+
+The RF algorithm has the highest AUC, even though it has slightly lower accuracy and true negative rates than the CART algorithm for the particular 0.161 binary prediction threshold value.
+
+
+Let's look at an ROC curve for each fit below to see the overall predictive potential across all threshold values.
+
+```{r}
+val_performance |>
+  pivot_longer(c("pred_lr_all", "pred_cart", "pred_rf"),
+               names_to = "fit", values_to = "pred", names_prefix = "pred_") |>
+  group_by(fit) |>
+  roc_curve(true, pred) |>
+  autoplot()
+```
+
+Since the RF ROC curve sits "above" the other two ROC curves almost everywhere, this implies that for almost every given true negative rate, there is a threshold choice for which the true positive rate will be higher for the RF algorithm than for the other two algorithms.
+
+
+Lastly, we can plot density plots for the predicted purchase probability for each class:
+
+
+
+
+```{r}
+val_performance |>
+  pivot_longer(c("pred_lr_all", "pred_cart", "pred_rf"),
+               names_to = "fit", values_to = "pred", names_prefix = "pred_") |>
+  ggplot() +
+  geom_density(aes(x = pred, fill = true), alpha = 0.5) +
+  facet_wrap(~fit)
+```
+
+
+
+### Stability to data perturbations
+
+
+
+To investigate the stability of each algorithm to data perturbations (specifically, bootstrap samples), we will first create 100 perturbed versions of the training dataset and store them in a tibble as a list column:
+
+```{r}
+set.seed(37698)
+shopping_data_perturbed <- tibble(iter = 1:100) %>%
+  rowwise() %>%
+  # for each row, create bootstrapped samples version of the training data
+  mutate(data_train_preprocessed_perturbed = list(sample_frac(shopping_train_preprocessed, 1, replace = TRUE)))
+# add a version without dummy variables for the CART and RF fits
+# use the same seed
+set.seed(37698)
+shopping_data_perturbed <- shopping_data_perturbed |>
+  mutate(data_train_preprocessed_nodummy_perturbed = list(sample_frac(shopping_train_preprocessed_nodummy, 1, replace = TRUE))) |>
+  ungroup()
+
+shopping_data_perturbed
+
+```
+
+
+
+Then we can fit a logistic regression, CART and RF fit to each perturbed dataset (and store these in list columns too). 
+
+```{r}
+#| warning: false
+#| message: false
+
+# this code will take a while to run
+shopping_data_perturbed_rf <- shopping_data_perturbed |>
+  rowwise() |>
+  # fit a logistic regression for each perturbed training dataset
+  mutate(lr = list(glm(factor(purchase, levels = c(0, 1)) ~ ., 
+                       data_train_preprocessed_perturbed,
+                       family = "binomial")),
+         cart = list(rpart(purchase ~ ., 
+                           data_train_preprocessed_nodummy_perturbed)),
+         rf = list(ranger(purchase ~ ., 
+                          data_train_preprocessed_nodummy_perturbed,
+                          probability = TRUE))) |>
+  ungroup()
+
+
+```
+
+
+Next, we can compute predictions for each validation set data point.
+
+```{r}
+
+shopping_data_perturbed_pred <- shopping_data_perturbed_rf |>
+  rowwise() |>
+  # create a list column of just the observed response vector 
+  transmute(iter,
+            true_val = list(factor(shopping_val_preprocessed$purchase, 
+                               levels = c(1, 0))),
+            pred_val_lr = list(predict(lr, shopping_val_preprocessed,
+                                   type = "response")),
+            pred_val_cart = list(predict(cart, shopping_val_preprocessed_nodummy)[, 1]),
+            pred_val_rf = list(predict(rf, shopping_val_preprocessed_nodummy)$predictions[, 1])) |>
+  ungroup() |>
+  # unnest the tibble
+  unnest(c(iter, true_val,  
+           pred_val_lr, pred_val_cart, pred_val_rf))
+# Look at the object we created
+print(shopping_data_perturbed_pred, width = Inf)
+```
+
+
+And compute the validation set predictive performance for each fit.
+
+```{r}
+shopping_data_perturbed_performance <- shopping_data_perturbed_pred |>
+  pivot_longer(c(pred_val_lr, pred_val_cart, pred_val_rf),
+               names_to = "fit", values_to = "pred_val", names_prefix = "pred_val_") |>
+  group_by(fit, iter) |>
+  summarise(auc = roc_auc_vec(true_val, pred_val), 
+         tp_rate = sens_vec(true_val, factor(as.numeric(pred_val > 0.161), levels = c(1, 0))),
+         tn_rate = spec_vec(true_val, factor(as.numeric(pred_val > 0.161), levels = c(1, 0))),
+         accuracy = accuracy_vec(true_val, factor(as.numeric(pred_val > 0.161), levels = c(1, 0))))
+```
+
+We can visualize the distributions of the perturbed performance measures using boxplots:
+
+
+```{r}
+shopping_data_perturbed_performance |>
+  pivot_longer(c(accuracy, tp_rate, tn_rate, auc), 
+               names_to = "measure", values_to = "value") |>
+  ggplot() +
+  geom_boxplot(aes(x = fit, y = value)) +
+  facet_wrap(~measure)
+```
+
+
+
+
+### Stability to judgment call perturbations
+
+
+
+
+
+
+The judgment calls that we will consider are:
+
+
+1. Converting the numeric variables (such as `browser`, `region`, and `operating_system`) to categorical variables, or leaving them in a numeric format (just in case there is some meaningful order to the levels that we don't know about).
+
+2. Converting the categorical `month` variable to a numeric format (since there is a natural ordering to the months), or leaving it in a categorical format (which will be turned into one-hot encoded dummy variables during pre-processing).
+
+3. Applying a log-transformation to the page visit and duration variables (because this makes the distributions look more symmetric, and may help improve predictive performance), or leaving them un-transformed.
+
+4. Removing very extreme sessions (e.g., that visited over 400 product-related pages in a single session, or spent more than 12 hours on product-related pages in a single session) that may be bots, versus leaving them in the data. Note that we chose the thresholds that we use to define a potential "bot" session based on a visualization of the distributions of these variables.
+
+
+Since each judgment call above has two options (TRUE or FALSE), so there are a total of $2^4 = 16$ different judgment call combinations that we will consider in this section. 
+
+The code below creates an object that contains a list column with each perturbed dataset.
+
+First, we will create a grid of all of the judgment call options.
+
+```{r}
+numeric_to_cat = c(TRUE, FALSE)
+month_numeric <- c(TRUE, FALSE)
+log_page <- c(TRUE, FALSE)
+remove_extreme <- c(TRUE, FALSE)
+param_options <- expand_grid(numeric_to_cat,
+                             month_numeric,
+                             log_page,
+                             remove_extreme)
+```
+
+Then we will create a version of the pre-processed dataset per each of the judgment call combination options. Note that unlike for the data perturbations (which were all based on the "default" pre-processed training dataset) where we could use the "default" validation dataset, we will need to explicitly create perturbed versions of the pre-processed validation data to match each perturbed version of the pre-processed training data.
+
+```{r}
+shopping_jc_perturbed <- param_options %>% 
+  rowwise() %>%
+  # add training data list column
+  mutate(data_train_preprocessed_perturbed = 
+           list(preprocessShoppingData(shopping_train,
+                                    .numeric_to_cat = numeric_to_cat,
+                                    .month_numeric = month_numeric,
+                                    .log_page = log_page,
+                                    .remove_extreme = remove_extreme)),
+         .before = 1) %>%
+  # create a version of the training data cat levels for matching val set to train set
+  mutate(data_train_preprocessed_perturbed_nodummy = 
+           list(preprocessShoppingData(shopping_train, 
+                                    .numeric_to_cat = numeric_to_cat,
+                                    .month_numeric = month_numeric,
+                                    .log_page = log_page,
+                                    .remove_extreme = remove_extreme,
+                                    .dummy = FALSE)),
+         .after = "data_train_preprocessed_perturbed") %>%
+  # extract the levels to use for ensuring the validation sets match the training set
+  mutate(browser_levels = 
+           list(levels(data_train_preprocessed_perturbed_nodummy$browser)),
+         operating_systems_levels = 
+           list(levels(data_train_preprocessed_perturbed_nodummy$operating_systems)),
+         traffic_type_levels = 
+           list(levels(data_train_preprocessed_perturbed_nodummy$traffic_type))) %>%
+  # add validation data list column
+  mutate(data_val_preprocessed_perturbed = 
+           list(preprocessShoppingData(shopping_val,
+                                    .numeric_to_cat = numeric_to_cat,
+                                    .month_numeric = month_numeric,
+                                    .log_page = log_page,
+                                    .remove_extreme = remove_extreme, 
+                                    # make sure val columns match train columns
+                                    .column_selection = colnames(data_train_preprocessed_perturbed),
+                                    .operating_systems_levels = operating_systems_levels, 
+                                    .browser_levels = browser_levels, 
+                                    .traffic_type_levels = traffic_type_levels)),
+         data_val_preprocessed_perturbed_nodummy = 
+           list(preprocessShoppingData(shopping_val,
+                                    .numeric_to_cat = numeric_to_cat,
+                                    .month_numeric = month_numeric,
+                                    .log_page = log_page,
+                                    .remove_extreme = remove_extreme, 
+                                    # make sure val columns match train columns
+                                    .column_selection = colnames(data_train_preprocessed_perturbed_nodummy),
+                                    .operating_systems_levels = operating_systems_levels, 
+                                    .browser_levels = browser_levels, 
+                                    .traffic_type_levels = traffic_type_levels,
+                                    .dummy = FALSE)),
+         .after = "data_train_preprocessed_perturbed_nodummy") 
+
+shopping_jc_perturbed
+```
+
+
+
+
+
+
+
+Then we can fit a logistic regression, CART and RF fit to each perturbed dataset (and store these in list columns too). 
+
+```{r}
+#| warning: false
+#| message: false
+
+# this code will take a while to run
+shopping_jc_perturbed_rf <- shopping_jc_perturbed |>
+  rowwise() |>
+  # fit a logistic regression for each perturbed training dataset
+  mutate(lr = list(glm(factor(purchase, levels = c(0, 1)) ~ ., 
+                       data_train_preprocessed_perturbed,
+                       family = "binomial")),
+         cart = list(rpart(purchase ~ ., 
+                           data_train_preprocessed_perturbed_nodummy)),
+         rf = list(ranger(purchase ~ ., 
+                          data_train_preprocessed_perturbed_nodummy,
+                          probability = TRUE))) |>
+  ungroup()
+
+
+```
+
+
+Next, we can compute predictions for each validation set data point.
+
+```{r}
+
+shopping_jc_perturbed_pred <- shopping_jc_perturbed_rf |>
+  rowwise() |>
+  # create a list column of just the observed response vector 
+  transmute(numeric_to_cat,
+            month_numeric,
+            log_page,
+            remove_extreme,
+            true_val = list(factor(data_val_preprocessed_perturbed$purchase, 
+                                   levels = c(1, 0))),
+            pred_val_lr = list(predict(lr, data_val_preprocessed_perturbed,
+                                       type = "response")),
+            pred_val_cart = list(predict(cart, data_val_preprocessed_perturbed_nodummy)[, 1]),
+            pred_val_rf = list(predict(rf, data_val_preprocessed_perturbed_nodummy)$predictions[, 1])) |>
+  ungroup() |>
+  # unnest the tibble
+  unnest(c(numeric_to_cat,
+           month_numeric,
+           log_page,
+           remove_extreme, 
+           true_val,  
+           pred_val_lr, pred_val_cart, pred_val_rf))
+# Look at the object we created
+print(shopping_jc_perturbed_pred, width = Inf)
+```
+
+
+And compute the validation set predictive performance for each fit.
+
+```{r}
+shopping_jc_perturbed_performance <- shopping_jc_perturbed_pred |>
+  pivot_longer(c(pred_val_lr, pred_val_cart, pred_val_rf),
+               names_to = "fit", values_to = "pred_val", names_prefix = "pred_val_") |>
+  group_by(fit, 
+           numeric_to_cat,
+           month_numeric,
+           log_page,
+           remove_extreme) |>
+  summarise(auc = roc_auc_vec(true_val, pred_val), 
+         tp_rate = sens_vec(true_val, factor(as.numeric(pred_val > 0.161), levels = c(1, 0))),
+         tn_rate = spec_vec(true_val, factor(as.numeric(pred_val > 0.161), levels = c(1, 0))),
+         accuracy = accuracy_vec(true_val, factor(as.numeric(pred_val > 0.161), levels = c(1, 0))))
+```
+
+We can visualize the distributions of the perturbed performance measures using boxplots:
+
+
+```{r}
+shopping_jc_perturbed_performance |>
+  pivot_longer(c(accuracy, tp_rate, tn_rate, auc), 
+               names_to = "measure", values_to = "value") |>
+  ggplot() +
+  geom_boxplot(aes(x = fit, y = value)) +
+  facet_wrap(~measure)
+```
+
+Overall, the logistic regression is the least stable, and the RF has highest AUC and TP rate, but lower accuracy and TN rate (CART has the highest accuracy and TN rate).

@@ -1,0 +1,341 @@
+---
+title: "[Chapter 11] Exploring the online shopping data"
+subtitle: "[DSLC stages]: EDA"
+format: 
+  html:
+    css: theme.css
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+    df-print: kable
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+In this document, you will find the PCS workflow and code for conducting an EDA of the online shopping data. Note that each section in this document corresponds to an interesting trend/finding. 
+
+Recall that we examined and cleaned the shopping data in the file `01_cleaning.qmd`. In each subsequent file that uses the cleaned version of the data, and the cleaning/pre-processing "preparation" procedure is contained in the `R/prepareShoppingData.R` file, which is sourced below.
+
+
+```{r}
+#| message: false
+library(tidyverse)
+library(fastDummies)
+library(janitor)
+library(patchwork)
+library(superheat)
+# if library(superheat) doesn't work, you might first need to run:
+# library(devtools)
+# install_github("rlbarter/superheat")
+
+# apply the cleaning and pre-processing functions
+source("functions/prepareShoppingData.R")
+# list all objects (and custom functions) that exist in our environment
+ls()
+
+# let's also create a version of the data with the original month variable and no dummy variables:
+shopping_train_preprocessed_month <- preprocessShoppingData(shopping_train, 
+                                                         .month_numeric = FALSE, 
+                                                         .dummy = FALSE)
+```
+
+
+
+## High-level summary of the data
+
+
+Here are some histograms of the numeric variables (which we already saw in the cleaning doc, but this time it is for the preprocessed data).  
+
+```{r}
+#| fig-height: 6
+shopping_train_preprocessed |>
+  select_if(is.numeric) |>
+  select_if(~n_distinct(.) > 20) |> 
+  pivot_longer(everything(), names_to = "variable") |>
+  ggplot() +
+  geom_histogram(aes(x = value), col = "white") +
+  facet_wrap(~variable, scales = "free", ncol = 3)
+```
+
+
+The following table shows a random sample of 15 sessions (this won't necessarily match the random sample that was in the book). 
+
+First, let's look at one version of the clean/pre-processed data:
+
+```{r}
+set.seed(28674)
+shopping_train_preprocessed |> sample_n(15) 
+```
+
+
+### Correlation matrix
+
+The heatmap below shows the correlation relationship between the continuous numeric variables.
+
+```{r}
+#| fig-height: 8
+#| fig-width: 8
+shopping_train_preprocessed |>
+  select_if(is.numeric) |>
+  cor() |>
+  superheat(heat.pal = c("#18678B", "white", "#18678B", "black"),
+            heat.pal.values = c(-0.2, 0.23, 0.7, 1), 
+            pretty.order.rows = TRUE, 
+            pretty.order.cols = TRUE, 
+            grid.hline.col = "white",
+            grid.vline.col = "white", 
+            bottom.label.text.angle = 90, 
+            bottom.label.size = 0.5)
+```
+
+
+What we can see is that there is a strong correlation between the `bounce_rates` and `exit_rates` variables, as well as between each page type and duration variable, such as between the `product_related` and `product_related_duration` variables, and the `informational` and `informational_duration` variables.
+
+
+## Exploring the response (purchse)
+
+Since our goal for this project is to predict which sessions will result in a purchase, let's take a closer look at the purchase response variable.
+
+Around 84% of the training sessions *did not* result in a purchase.
+
+```{r}
+shopping_train_preprocessed |> 
+  count(purchase) |>
+  mutate(prop = n / sum(n))
+```
+
+
+
+### Relationships between predictors and response (purchase)
+
+Let's examine the relationship of several variables with the purchase response.
+
+
+First, let's compare the numeric variables across sessions that resulted in a purchase and those that don't using boxplots. A version of the data that does not contain dummy variables will be helpful here:
+
+```{r}
+#| fig-height: 13
+shopping_train_preprocessed_nodummy |>
+  select(purchase, where(is.numeric), -return_visitor, -weekend) |>
+  pivot_longer(-c(purchase), names_to = "variable", values_to = "value") |>
+  ggplot() +
+  geom_boxplot(aes(x = purchase, y = value)) +
+  facet_wrap(~variable, scales = "free", ncol = 2) +
+  scale_x_discrete(labels = c("purchase", "no purchase"))
+```
+
+Since the distributions of almost all of the features are very skewed, the relationships thus might be clearer if we apply log-transformations to the predictor variables. In fact, this might also help our predictive performance later on (which is why we included the option to apply a logarithmic transformation as a pre-processing step in our pre-processing function).
+
+The log-transformed feature distributions (by purchase response) are shown below:
+
+```{r}
+#| fig-height: 13
+shopping_train_preprocessed_nodummy |>
+  select(purchase, where(is.numeric), -return_visitor) |>
+  pivot_longer(-c(purchase), names_to = "variable", values_to = "value") |>
+  ggplot() +
+  geom_boxplot(aes(x = purchase, y = log(value + 0.1))) +
+  facet_wrap(~variable, scales = "free", ncol = 2) +
+  scale_x_discrete(labels = c("purchase", "no purchase"))
+```
+
+It is now much clearer that there are some differences between sessions that did and did not have a purchase.
+
+
+One particular trend is that *sessions that spend more time on product-related pages also tend to be more likely to end in a purchase* (the bottom-left boxplot). But this boxplot isn't a great way to convey this relevant piece of information to a general audience. Let's think about how to more clearly present this information in a more digestible manner.
+
+
+
+
+### Explanatory figure: sessions that spend more time on product-related pages tend to be more likely to end in a purchase
+
+Instead of a boxplot, perhaps we can present this information using a simple proportion, e.g., compare the proportion of sessions that made a purchase based on whether the session *spent at least one hour on product-related pages*.
+
+One possible example is shown below:
+
+```{r}
+# compute the proportion of sessions have a purchase within one hour of browsing product-related pages
+prop_one_hour <- shopping_train_preprocessed %>%
+  mutate(one_hour = product_related_duration > 60) %>%
+  group_by(one_hour) %>%
+  summarise(purchase_prop = sum(purchase == "1") / n()) 
+
+prop_one_hour %>% 
+  ggplot() +
+  geom_col(aes(x = one_hour, y = purchase_prop, 
+               fill = as.factor(one_hour)), 
+           width = 0.7) +
+  geom_text(aes(x = one_hour, y = purchase_prop, 
+                label = paste0(round(100 * purchase_prop), "%")),
+            nudge_y = 0.03) +
+  scale_y_continuous("Proportion of sessions making a purchase", 
+                     breaks = seq(0, 1, 0.2),
+                     labels = paste0(100 * seq(0, 1, 0.2), "%"),
+                     limits = c(0, 1),
+                     expand = c(0, 0)) +
+  scale_x_discrete(NULL, labels = c("< 1 hour spent\n on product-related pages", "> 1 hour spent\n on product-related pages")) +
+  scale_fill_manual(values = c("grey60", "grey30"), 
+                    guide = "none") +
+  theme_classic() +
+  theme(axis.line = element_blank(),
+        axis.ticks = element_line(color = "grey90"), 
+        panel.grid.major.y = element_line(color = "grey90")) +
+  ggtitle("Sessions that spend more than 1 hour on product-related pages are\ntwice as likely to make a purchase than sessions that spend less\nthan 1 hour on product-related pages")
+```
+
+As a brief stability test,  below we recreate this figure using a threshold of 90, instead of 60, minutes. Note that the results are virtually identical:
+
+
+
+```{r}
+# compute the proportion of sessions have a purchase within one hour
+prop_one_half_hour <- shopping_train_preprocessed %>%
+  mutate(one_half_hour = product_related_duration > 90) %>%
+  group_by(one_half_hour) %>%
+  summarise(purchase_prop = sum(purchase == "1") / n()) 
+
+prop_one_half_hour %>% 
+  ggplot() +
+  geom_col(aes(x = one_half_hour, y = purchase_prop, 
+               fill = as.factor(one_half_hour)), 
+           width = 0.7) +
+  geom_text(aes(x = one_half_hour, y = purchase_prop, 
+                label = paste0(round(100 * purchase_prop), "%")),
+            nudge_y = 0.03) +
+  scale_y_continuous("Proportion of sessions making a purchase", 
+                     breaks = seq(0, 1, 0.2),
+                     labels = paste0(100 * seq(0, 1, 0.2), "%"),
+                     limits = c(0, 1),
+                     expand = c(0, 0)) +
+  scale_x_discrete(NULL, labels = c("< 1 hour spent\n on product-related pages", "> 1 hour spent\n on product-related pages")) +
+  scale_fill_manual(values = c("grey60", "grey30"), 
+                    guide = "none") +
+  theme_classic() +
+  theme(axis.line = element_blank(),
+        axis.ticks = element_line(color = "grey90"), 
+        panel.grid.major.y = element_line(color = "grey90")) +
+  ggtitle("Sessions that spend more than 1 hour on product-related pages are\ntwice as likely to make a purchase than sessions that spend less\nthan 1 hour on product-related pages")
+```
+
+## In what months do the special days occur?
+
+The special days feature is defined as "a numeric value between 0 and 1 indicating how closeness the site visiting time is to a "special day" in which the sessions are - hypothetically - more likely to be finalized with a transaction. The value of this attribute is determined by considering the dynamics of e-commerce such as the duration between the order date and delivery date. For example, for Valentine’s day, `special_day` takes a nonzero value between February 2 and February 12, achieving the maximum value of 1 on February 8 (6 days before Valentine's day)."
+
+
+Let's take a look and see when these special days actually occur. The following table shows that all of the special days occur in February and May (surprisingly not in November/December). Since the data dictionary (from the paper) definition of a special day specifically mentions Valentine's day (and Mother's day is in May), it is possible that this is a store that sells flowers or some other gift that is common for both Valentine's day and Mother's day...
+
+
+```{r}
+shopping_train_preprocessed_month |>
+  group_by(month) |>
+  summarize(sum(special_day != 0))
+
+```
+
+
+We can also investigate whether the proportion of purchases increases on days with non-zero values of "special day". It seems that the opposite is actually true:
+
+```{r}
+shopping_train_preprocessed |>
+  group_by(special_day != 0) |>
+  summarise(prop_purchase = sum(purchase == 1) / n())
+```
+
+The table above shows that over 17% of sessions that do not take place near special days end in a purchase, whereas only 6% of sessions near special days end in a purchase...
+
+
+A next question that arises is whether the traffic and number of purchases actually increase during months with special days. Let's investigate
+
+
+
+## Which months have the highest purchase rate
+
+
+The bar chart below shows the number of sessions each month.
+
+```{r}
+shopping_train_preprocessed_month |>
+  # force levels to appear in correct order
+  mutate(month = factor(month, 
+                        levels = c("Feb", "Mar", "May", "June", "Jul", 
+                                   "Aug", "Sep", "Oct", "Nov", "Dec"))) |>
+  # count the number of times each month appears
+  count(month) |>
+  ggplot() +
+  geom_col(aes(x = month, y = n)) +
+  labs(y = "number of sessions")
+```
+
+Surprisingly, February actually has the *least* number of sessions. May, however, has the most sessions, followed by November, March and December
+
+The bar chart below shows the *proportion* of the sessions each month that have a purchase. 
+
+```{r}
+shopping_train_preprocessed_month |>
+  # force levels to appear in correct order
+  mutate(month = factor(month, 
+                        levels = c("Feb", "Mar", "May", "June", "Jul", 
+                                   "Aug", "Sep", "Oct", "Nov", "Dec"))) |>
+  # for each month
+  group_by(month) |>
+  # compute the prop of sessions with a purchase
+  summarise(prop_purchase = sum(purchase == 1) / n()) |>
+  ggplot() +
+  geom_col(aes(x = month, y = prop_purchase)) +
+  labs(y = "proportion of sessions with a purchase")
+```
+
+Again, February has substantially *fewer* sessions ending in a purchase, relative to the other months, and May does not seem like it has particularly high rate of purchases either. The later months in the year have (particularly November) have higher rates of purchases (and these proportions are actually surprisingly high--more than 20% of sessions having a purchase seems absurd. This data seems kind of fishy!).
+
+
+
+
+## Do the proportion of sessions with purchases differ by browser, operating system, region, or type of traffic
+
+
+Next, let's examine whether the proportion of sessions that make a purchase differs by browser, operating system, region, or type of traffic.
+
+The bar charts below show that there isn't much difference in the rates of purchase across different regions and operating systems (except for "3"), but there are quite significant differences across browser and traffic type. 
+
+```{r}
+gg_browser <- shopping_train_preprocessed_nodummy |>
+  group_by(browser) |>
+  summarise(prop_purchase = sum(purchase == 1) / n()) |>
+  ggplot() +
+  geom_col(aes(x = browser, y = prop_purchase)) +
+  ggtitle("Browser")
+
+gg_operating_system <- shopping_train_preprocessed_nodummy |>
+  group_by(operating_systems) |>
+  summarise(prop_purchase = sum(purchase == 1) / n()) |>
+  ggplot() +
+  geom_col(aes(x = operating_systems, y = prop_purchase)) +
+  ggtitle("Operating system")
+
+gg_region <- shopping_train_preprocessed_nodummy |>
+  group_by(region) |>
+  summarise(prop_purchase = sum(purchase == 1) / n()) |>
+  ggplot() +
+  geom_col(aes(x = region, y = prop_purchase)) +
+  ggtitle("Region")
+
+gg_traffic <- shopping_train_preprocessed_nodummy |>
+  group_by(traffic_type) |>
+  summarise(prop_purchase = sum(purchase == 1) / n()) |>
+  ggplot() +
+  geom_col(aes(x = traffic_type, y = prop_purchase)) +
+  ggtitle("Traffic type")
+
+(gg_browser + gg_operating_system) / 
+  (gg_region + gg_traffic)
+
+```
+
+

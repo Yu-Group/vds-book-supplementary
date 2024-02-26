@@ -1,0 +1,427 @@
+---
+title: "[Chapter 13] The final online shopping purchase intent predictions"
+subtitle: "[DSLC stages]: Analysis"
+format: 
+  html:
+    css: theme.css
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+
+The following code sets up the libraries and creates cleaned and pre-processed training, validation and test data that we will use in this document.
+
+```{r}
+#| message: false
+#| warning: false
+
+# loading libraries
+library(patchwork)
+library(lubridate)
+library(scales)
+library(yardstick)
+library(fastDummies)
+library(tidyverse)
+library(janitor)
+library(ranger)
+# apply the cleaning and pre-processing functions
+source("functions/prepareShoppingData.R")
+# list all objects (and custom functions) that exist in our environment
+ls()
+
+```
+
+In this document we will demonstrate how to use the principles of PCS to choose the final prediction. We will demonstrate two different formats of the final prediction based on:
+
+1. The **single "best"** predictive algorithm, in terms of validation set performance from among a range of different algorithms each trained on several different cleaning/pre-processing judgment call-perturbed versions of the training dataset.
+
+1. An **ensemble** prediction, which combines the predictions from a range of predictive fits from across different algorithms and cleaning/pre-processing judgment call-perturbations that pass a predictability screening test.
+
+Note that we do not compute PCS **prediction perturbation intervals** for binary response predictions, because although we can compute intervals for our class probability predictions, we cannot calibrate them (and so our interpretation will necessarily be heavily influenced by the number of perturbations that we consider).
+
+
+## Computing the perturbed predictions
+
+Since each of these approaches will involve each perturbed version of the cleaning/pre-processing judgment call training (and validation) datasets that we used in our stability analyses, we will create the cleaning/pre-processing judgment call-perturbed datasets and fit the algorithms here.
+
+
+### Create the perturbed datasets
+
+First, let's create the tibble containing the cleaning/pre-processing judgment call perturbed datasets:
+
+```{r}
+numeric_to_cat = c(TRUE, FALSE)
+month_numeric <- c(TRUE, FALSE)
+log_page <- c(TRUE, FALSE)
+remove_extreme <- c(TRUE, FALSE)
+param_options <- expand_grid(numeric_to_cat,
+                             month_numeric,
+                             log_page,
+                             remove_extreme)
+# create the perturbed datasets in a list column
+shopping_jc_perturbed <- param_options %>% 
+  rowwise() %>%
+  # add training data list column
+  mutate(data_train_perturbed = 
+           list(preprocessShoppingData(shopping_train,
+                                    .numeric_to_cat = numeric_to_cat,
+                                    .month_numeric = month_numeric,
+                                    .log_page = log_page,
+                                    .remove_extreme = remove_extreme))) %>%
+  # create a version of the training data cat levels for matching val set to train set
+  mutate(data_train_perturbed_nodummy = 
+           list(preprocessShoppingData(shopping_train, 
+                                    .numeric_to_cat = numeric_to_cat,
+                                    .month_numeric = month_numeric,
+                                    .log_page = log_page,
+                                    .remove_extreme = remove_extreme,
+                                    .dummy = FALSE))) %>%
+  # extract the levels to use for ensuring the validation sets match the training set
+  mutate(browser_levels = 
+           list(levels(data_train_perturbed_nodummy$browser)),
+         operating_systems_levels = 
+           list(levels(data_train_perturbed_nodummy$operating_systems)),
+         traffic_type_levels = 
+           list(levels(data_train_perturbed_nodummy$traffic_type))) %>%
+  # add validation data list column
+  mutate(data_val_perturbed = 
+           list(preprocessShoppingData(shopping_val,
+                                    .numeric_to_cat = numeric_to_cat,
+                                    .month_numeric = month_numeric,
+                                    .log_page = log_page,
+                                    # note that since we want to ensure that all 
+                                    # fits are compared on the same set of data 
+                                    # points, we need to remove the extreme data 
+                                    # points for all perturbations
+                                    .remove_extreme = TRUE, 
+                                    # make sure val columns match train columns
+                                    .column_selection = colnames(data_train_perturbed),
+                                    .operating_systems_levels = operating_systems_levels, 
+                                    .browser_levels = browser_levels, 
+                                    .traffic_type_levels = traffic_type_levels, 
+                                    .id = TRUE)))  |>
+    # add test data list column
+  mutate(data_test_perturbed = 
+           list(preprocessShoppingData(shopping_test,
+                                    .numeric_to_cat = numeric_to_cat,
+                                    .month_numeric = month_numeric,
+                                    .log_page = log_page,
+                                    # note that since we want to ensure that all 
+                                    # fits are compared on the same set of data 
+                                    # points, we need to remove the extreme data 
+                                    # points for all perturbations
+                                    .remove_extreme = TRUE, 
+                                    # make sure val columns match train columns
+                                    .column_selection = colnames(data_train_perturbed),
+                                    .operating_systems_levels = operating_systems_levels, 
+                                    .browser_levels = browser_levels, 
+                                    .traffic_type_levels = traffic_type_levels,
+                                    .id = TRUE))) |>
+  select(-data_train_perturbed_nodummy, 
+         -browser_levels, -operating_systems_levels, -traffic_type_levels)
+
+# look at the object we just created
+print(shopping_jc_perturbed, width = Inf)
+```
+
+
+
+
+### Fitting the algorithms to each perturbed dataset
+
+
+
+Let's create a column for the LS (applied to a binary response problem), logistic regression, and RF algorithms, each trained using each judgment call-perturbed version of the training data (i.e., one for each row). Then we will add a column containing the predictions for each fit.
+
+
+
+```{r}
+#| label: jc-perturbations
+
+# this will take a little while to run
+set.seed(299433)
+perturbed_jc_pred <- shopping_jc_perturbed %>%
+  ungroup() %>%
+  # to speed up the computation, you can uncomment the lines below to do the
+  # analysis for just a random subset of judgment call combinations
+  # your conclusions might differ slightly though
+  # sample_n(50) %>%
+  rowwise() %>%
+  # fit each algorithm (lasso and ridge will be fit below) and store them each 
+  # in a column
+  mutate(ls = list(lm(parse_number(as.character(purchase)) ~ ., data_train_perturbed)),
+         lr = list(glm(factor(purchase, levels = c(0, 1)) ~ ., data_train_perturbed, 
+                       family = "binomial")),
+         rf = list(ranger(purchase  ~ ., data_train_perturbed, probability = TRUE))) %>%
+  # compute validation set predictions for each algorithm 
+  mutate(pred_val_ls = list(predict(ls, data_val_perturbed)),
+         pred_val_lr = list(predict(lr, data_val_perturbed, type = "response")),
+         pred_val_rf = list(predict(rf, data_val_perturbed)$predictions[, 1])) %>%
+  # compute test set predictions for each algorithm
+  mutate(pred_test_ls = list(predict(ls, data_test_perturbed)),
+         pred_test_lr = list(predict(lr, data_test_perturbed, type = "response")),
+         pred_test_rf = list(predict(rf, data_test_perturbed)$predictions[, 1])) %>%
+  # add a column with just the actual observed sale price value
+  mutate(true_val = list(data_val_perturbed$purchase),
+         true_test = list(data_test_perturbed$purchase),
+         # add a column for the session ids
+         id_val = list(data_val_perturbed$id),
+         id_test = list(data_test_perturbed$id)) 
+
+print(perturbed_jc_pred, width = Inf)
+```
+
+
+Next, let's create a long-form version of this tibble, which contains a single row for each of the perturbed algorithms that we fit, and compute the performance measures.
+
+```{r}
+perturbed_jc_performance <- perturbed_jc_pred |> 
+  ungroup() |>
+  # select the relevant validation set prediction performance
+  select(# judgment calls
+    numeric_to_cat, month_numeric, log_page, remove_extreme,
+    # val predictions
+    pred_val_ls, pred_val_lr, pred_val_rf,  
+    # val truth
+    true_val) |>
+  # pivot to a long-form version with one column for all the predictions
+  pivot_longer(cols = c("pred_val_ls", "pred_val_lr", "pred_val_rf"), 
+               names_to = "algorithm", 
+               values_to = "pred_val", 
+               names_prefix = "pred_val_") %>%
+  rowwise() %>%
+  # undo the log transformation where relevant
+  mutate(pred_val_binary = list(factor(as.numeric(pred_val >= 0.161), levels = c(1, 0)))) |> 
+  # add performance metrics for each perturbed fit
+  mutate(accuracy = accuracy_vec(true_val, pred_val_binary),
+         tp_rate = sens_vec(true_val, pred_val_binary),
+         tn_rate = spec_vec(true_val, pred_val_binary),
+         auc = roc_auc_vec(true_val, pred_val)) 
+
+print(perturbed_jc_performance, width = Inf)
+```
+
+
+## Approach 1: Choosing a single predictive fit using PCS
+
+Having computed the performance of each of our judgment-call perturbed fits for each algorithm we considered in this book, we can then identify which fit yields the "best" performance.
+
+The following code prints the details of the fits with the highest AUC performance:
+
+```{r}
+shopping_top_auc <- perturbed_jc_performance %>% 
+  arrange(desc(auc)) %>%
+  select(algorithm, numeric_to_cat, month_numeric, log_page, remove_extreme, 
+         accuracy, tp_rate, tn_rate, auc) 
+print(head(shopping_top_auc), width = Inf)
+```
+
+
+Then we can print the details of the fits with the highest true positive rate:
+
+```{r}
+shopping_top_tp_rate <- perturbed_jc_performance %>% 
+  arrange(desc(tp_rate)) %>%
+  select(algorithm, numeric_to_cat, month_numeric, log_page, remove_extreme, 
+         accuracy, tp_rate, tn_rate, auc) 
+print(head(shopping_top_tp_rate), width = Inf)
+```
+
+
+we can print the details of the fits with the highest true negative rate:
+
+```{r}
+shopping_top_tn_rate <- perturbed_jc_performance %>% 
+  arrange(desc(tn_rate)) %>%
+  select(algorithm, numeric_to_cat, month_numeric, log_page, remove_extreme, 
+         accuracy, tp_rate, tn_rate, auc) 
+print(head(shopping_top_tn_rate), width = Inf)
+```
+
+and we can print the details of the fits with the highest accuracy:
+
+```{r}
+shopping_top_acc <- perturbed_jc_performance %>% 
+  arrange(desc(accuracy)) %>%
+  select(algorithm, numeric_to_cat, month_numeric, log_page, remove_extreme, 
+         accuracy, tp_rate, tn_rate, auc) 
+print(head(shopping_top_acc), width = Inf)
+```
+
+
+
+The "best" fit in terms of the highest validation set AUC is the RF fit with the following cleaning/pre-processing judgment call options:
+
+- `numeric_to_cat = FALSE`
+
+- `month_numeric = FALSE`
+
+- `log_page = FALSE`
+
+- `remove_extreme = TRUE`
+
+
+This is also the fit with the highest accuracy (based on the 0.161 cutoff). Thus, we will use the **RF algorithm trained on the training set with these particular cleaning/pre-processing judgment calls as our "final" algorithm.**
+
+
+```{r}
+shopping_train_preprocessed_selected <- preprocessShoppingData(shopping_train,
+                                                       .numeric_to_cat = FALSE,
+                                                       .month_numeric = FALSE,
+                                                       .log_page = FALSE,
+                                                       .remove_extreme = TRUE)
+single_fit <- ranger(purchase ~ ., 
+                  shopping_train_preprocessed_selected,
+                  probability = TRUE)
+```
+
+### Test set evaluation
+
+Let's then evaluate this final fit using the test set (since our validation set was used to choose it, it can no longer provide an independent assessment of its performance).
+
+First we must create the relevant pre-processed test set.
+
+```{r}
+shopping_test_preprocessed_selected <- preprocessShoppingData(shopping_test,
+                                                           .numeric_to_cat = FALSE,
+                                                           .month_numeric = FALSE,
+                                                           .log_page = FALSE,
+                                                           .remove_extreme = TRUE,
+                                                           .operating_systems_levels = levels(shopping_train_preprocessed_selected$operating_systems), 
+                                                           .browser_levels = levels(shopping_train_preprocessed_selected$browser), 
+                                                           .traffic_type_levels = levels(shopping_train_preprocessed_selected$traffic_type), 
+                                                           .column_selection = colnames(shopping_train_preprocessed_selected))
+
+```
+
+And then we can compute the predictions for the test set and evaluate them.
+
+```{r}
+# compute the predictions for the test set
+shopping_test_pred <- predict(single_fit, shopping_test_preprocessed_selected)$predictions[, 1]
+shopping_test_pred_binary <- factor(as.numeric(shopping_test_pred >= 0.161), levels = c(1, 0)) 
+# AUC measure
+roc_auc_vec(shopping_test_preprocessed_selected$purchase, shopping_test_pred)
+# true positive measure
+sens_vec(shopping_test_preprocessed_selected$purchase, shopping_test_pred_binary)
+# true negative measure
+spec_vec(shopping_test_preprocessed_selected$purchase, shopping_test_pred_binary)
+# accuracy measure
+accuracy_vec(shopping_test_preprocessed_selected$purchase, shopping_test_pred_binary)
+```
+
+These performance measures all indicate very good performance for this particular RF algorithm fit on the test set.
+
+
+
+## Approach 2: PCS ensemble prediction 
+
+In this approach, we take a look at all of the predictions that we computed above (across all algorithms and judgment call combinations), and we first conduct a predictability screening test to ensure that we are not using particularly poorly performing fits to create our ensemble.
+
+Let's visualize the distribution of the correlation performance measure across all of the algorithms and cleaning/pre-processing judgment calls (grouping by algorithm) using boxplots.
+
+First we will consider the AUC:
+
+```{r}
+perturbed_jc_performance |>
+  ggplot() +
+  geom_boxplot(aes(x = algorithm, y = auc))
+```
+
+And then the true positive rate (based on the 0.161 cutoff):
+
+```{r}
+perturbed_jc_performance |>
+  ggplot() +
+  geom_boxplot(aes(x = algorithm, y = tp_rate))
+```
+
+
+And then the true negative rate (based on the 0.161 cutoff):
+
+```{r}
+perturbed_jc_performance |>
+  ggplot() +
+  geom_boxplot(aes(x = algorithm, y = tn_rate))
+```
+
+
+and the accuracy (based on the 0.161 cutoff):
+
+```{r}
+perturbed_jc_performance |>
+  ggplot() +
+  geom_boxplot(aes(x = algorithm, y = accuracy))
+```
+
+
+It is clear that across all measures, the RF algorithm stands out as a top performer. While we could choose to define a predictability screening test that only considers the RF fits, this feels unnecessarily limiting, so we will keep all fits in our ensemble (although we may not expect to see an improvement in performance on the previous "single best" fit).
+
+
+
+### Test set evaluation
+
+To evaluate the ensemble, let's compute the ensemble predictions for each of the *test set* data points.
+
+
+```{r}
+perturbed_jc_pred_test <- perturbed_jc_pred |> 
+  ungroup() %>%
+  # select the relevant validation set prediction performance
+  select(
+    # judgment calls
+    numeric_to_cat, month_numeric, log_page, remove_extreme,
+    # val predictions
+    pred_test_ls, pred_test_lr, pred_test_rf,
+    # val truth
+    true_test, id_test) |>
+  # pivot to a long-form version with one column for all the predictions
+  pivot_longer(cols = c("pred_test_ls", "pred_test_lr", "pred_test_rf"), 
+               names_to = "algorithm", 
+               values_to = "pred_test", 
+               names_prefix = "pred_test_") %>%
+   rowwise() %>%
+  # compute the binary predictions
+  mutate(pred_test_binary = list(factor(as.numeric(pred_test >= 0.161), levels = c(1, 0)))) |> 
+  # add performance metrics for each perturbed fit
+  # expand the nested list columns
+  unnest(c("true_test", "id_test", "pred_test", "pred_test_binary"))
+
+```
+
+
+Since the unthresholded prediction output of each algorithms does not necessarily have the same meaning (specifically, the LS output is not actually a class probability prediction), we will only compute binary predictions using a majority vote:
+
+```{r}
+perturbed_jc_pred_ensemble_test <- perturbed_jc_pred_test |> 
+  # compute the majority vote prediction for each session
+  group_by(id_test) |>
+  summarise(ensemble_pred_test = factor(as.numeric(sum(pred_test_binary == 1) >= n() / 2), levels = c(1, 0)),
+            true_test = unique(true_test)) |>
+  ungroup()
+
+head(perturbed_jc_pred_ensemble_test)
+```
+
+
+The performance of the ensemble predictions can then be computed using the regular metrics
+
+```{r}
+perturbed_jc_pred_ensemble_test %>%
+  # add performance metrics for each perturbed fit
+  summarise(accuracy = accuracy_vec(true_test, ensemble_pred_test),
+            tp_rate = sens_vec(true_test, ensemble_pred_test),
+            tn_rate = spec_vec(true_test, ensemble_pred_test)) 
+```
+
+Indeed, the test set correlation performance of the ensemble fit is slightly worse (lower) than the "single best" fit across all measures.

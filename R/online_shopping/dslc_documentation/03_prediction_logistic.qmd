@@ -1,0 +1,1021 @@
+---
+title: "[Chapter 11] Predicting online shopping purchase intent using using logistic regression"
+subtitle: "[DSLC stages]: Analysis"
+format: 
+  html:
+    css: theme.css
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+In this document, you will find the PCS workflow and code for fitting logistic regression to the online shopping data.
+
+
+The following code sets up the libraries and creates cleaned and pre-processed training, validation and test data that we will use in this document.
+
+```{r}
+#| message: false
+#| warning: false
+library(patchwork)
+library(lubridate)
+library(scales)
+library(yardstick)
+library(fastDummies)
+library(tidyverse)
+library(janitor)
+# apply the cleaning and pre-processing functions
+source("functions/prepareShoppingData.R")
+# list all objects (and custom functions) that exist in our environment
+ls()
+
+# create a LS fit for use later
+ls_all <- lm(parse_number(as.character(purchase)) ~ .,
+             shopping_train_preprocessed)
+```
+
+
+Note that the `glm()` function expects that the first level of the response factor is the "failure" (no purchase) level.
+
+## LS and Logistic regression for a small sample of 20 training points
+
+Fitting Let's create the sample of 20 training sessions that we used in Chapter 12 for demonstrating using the LS and logistic regression algorithms for binary responses. 
+
+```{r}
+# create a version of the training dataset with just the 20 training sessions
+shopping_train_sample <- shopping_train_preprocessed |>
+  # create a temporary id column
+  mutate(id = 1:n()) |>
+  # filter the the same sessions that were used in the book chapter
+  filter(id %in% c(753, 6492, 6801, 1877, 
+                   3298, 3635,  603, 3632, 4258, 4783, 2758, 4615, 7313,
+                   3012, 2109, 7138, 5740, 270, 2899,  425)) |>
+  select(-id)
+```
+
+The code below fits a simple one-predictor LS fit using this sample of 20 training sessions:
+
+```{r}
+ls_example <- lm(parse_number(as.character(purchase)) ~ product_related_duration, 
+                 shopping_train_sample)
+ls_example
+```
+
+
+To use this fit to generate predictions, we can use the `predict()` function. For example, to predict the purchase response of a session that spent 20 minutes on product-related pages:
+
+
+```{r}
+predict(ls_example, tibble(product_related_duration = 20))
+```
+
+Note that this is neither 0 nor is it 1. What does it mean to have a predicted purchase response of 0.76? Since it is above 0.5^[Not that this is a good threshold to use here, but it suffices for this example. A better threshold would be the proportion of sessions that ended with a purchase in the training data, but the conclusion remains the same.], we could round it up to 1 and predict that the response of such a session is "purchase" (i.e., equal to 1).
+
+The corresponding logistic regression fit can be computed using `glm()` with the `family = "binomial"` argument:
+
+```{r}
+logistic_example <- glm(factor(purchase, levels = c(0, 1)) ~ product_related_duration, 
+                        shopping_train_sample,
+                        family = "binomial")
+logistic_example
+```
+
+```{r}
+predict(logistic_example, tibble(product_related_duration = 20),
+        type = "response")
+```
+
+
+
+## Fitting logistic regression to the full training dataset
+
+
+Next, we can move beyond this sample of just 20 training data points and compute a logistic regression fit for the entire training dataset:
+
+
+```{r}
+lr_all <- glm(factor(purchase, levels = c(0, 1)) ~ ., 
+              shopping_train_preprocessed,
+              family = "binomial")
+lr_all
+```
+
+
+### Comparing the coefficients using bootstrap standardization
+
+Just as was the case for the LS algorithm, the coefficients of each predictive feature are not comparable unless the features have been pre-standardized (i.e., prior to fitting the logistic regression model) or the coefficients have been standardized, e.g., by using the bootstrap to estimate the standard deviation of each coefficient, and then dividing each coefficient by these estimated standard deviations.
+
+
+The code below demonstrates the latter bootstrapping approach to computing comparable coefficients. 
+
+First, we will create 1000 bootstrapped (sampled with replacement) versions of the training dataset, and we will compute a logistic regression fit to each bootstrapped training data sample.
+
+```{r}
+#| results: hide
+#| warning: false
+#| message: false
+#| cache: true
+
+
+# (this code will take a moment to run)
+set.seed(27398)
+boot_coefs <- map_df(1:1000, function(i) {
+  # print out which iteration we are up to
+  print(i)
+  # create a bootstrapped sample
+  shopping_boot <- shopping_train_preprocessed |>
+    sample_frac(1, replace = TRUE) 
+  # compute a logistic regression fit
+  lr_all_boot <- glm(factor(purchase, levels = c(0, 1)) ~ ., 
+                     shopping_boot, 
+                     family = "binomial")
+  # return the results in a data frame
+  return(enframe(lr_all_boot$coefficients, 
+                 name = "variable", 
+                 value = "coefficient"))
+  # create a "boot" identifier
+}, .id = "boot") 
+
+```
+
+
+```{r}
+# look at the object we just created
+boot_coefs
+```
+
+Having computed 1000 bootstrapped coefficient values, we can compute their standard deviation, and use this value to standardize the original coefficient values
+
+```{r}
+# standardize the coefficients
+coefs_std <- boot_coefs |>
+  # for each variable
+  group_by(variable) |>
+  # compute the standard deviation of the bootstrapped coefficient values
+  summarise(boot_sd = sd(coefficient)) |>
+  ungroup() |>
+  # add a column with the original coefficient values (joined by variable)
+  left_join(enframe(lr_all$coefficients, 
+                    name = "variable", 
+                    value = "coefficient"), 
+            by = "variable") |>
+  # compute the standardized coefficients by dividing by the bootstrapped sd
+  mutate(standardized_coefficient = coefficient / boot_sd) |>
+  # arrange in descending order of (abs value) standardized coefficient
+  arrange(desc(abs(standardized_coefficient))) |>
+  # remove the intercept
+  filter(variable != "(Intercept)") |>
+  select(variable, coefficient, boot_sd, standardized_coefficient)
+
+print(coefs_std, width = Inf)
+```
+
+The `page_values` feature has the largest standardized coefficient *by far*, indicating that it is the variable that is most predictive of the purchase response.
+
+## Evaluating binary predictions for a sample of 20 validation points
+
+First, let's start by evaluating our predictions using just a random sample of 20 validation set sessions.
+
+Let's create the same 20-session sample that was used in the book for evaluation.
+
+```{r}
+sample_index <- c(961, 1315, 408, 1678, 1810,
+                  1566, 2036, 1005, 2198, 685, 
+                  1680, 1347, 2265, 286, 1393,
+                  2267, 2247, 1576, 217, 420)
+shopping_val_sample <- shopping_val_preprocessed[sample_index, ]
+```
+
+First, let's print out the observed and predicted (using LS and logistic regression fit to the full training set) purchase response for these 20 validation sessions.
+
+```{r}
+pred_val_sample <- shopping_val_sample |>
+  transmute(purchase = purchase, 
+            ls_predict = predict(ls_all, shopping_val_sample),
+            ls_predict_binary = factor(as.numeric(ls_predict > 0.5), levels = c(1, 0)),
+            lr_predict = predict(lr_all, shopping_val_sample,
+                                 type = "response"),
+            lr_predict_binary = factor(as.numeric(lr_predict > 0.5), levels = c(1, 0)))
+pred_val_sample
+```
+
+
+### The confusion matrix
+
+The confusion matrix for the LS (binary) fit, where the binary predictions are based (for now) on a threshold of 0.5, is
+
+
+```{r}
+conf_ls <- table(pred_val_sample$purchase, pred_val_sample$ls_predict_binary)
+conf_ls
+```
+
+and for the logistic regression fit, the confusion matrix (again, for now, based on a threshold of 0.5) is:
+
+```{r}
+conf_lr <- table(pred_val_sample$purchase, pred_val_sample$lr_predict_binary)
+conf_lr
+```
+
+
+### Prediction accuracy
+
+
+There are several ways that you can compute the prediction accuracy, such as from the confusion matrix, by adding up the diagonal entries and dividing by the total:
+
+```{r}
+(conf_ls[1, 1] + conf_ls[2, 2]) / sum(conf_ls)
+```
+
+```{r}
+(conf_lr[1, 1] + conf_lr[2, 2]) / sum(conf_lr)
+```
+
+
+or using the `accuracy()` function (if using columns of a data frame, alternatively if providing vectors, you can use the `accuracy_vec()` function) from the "yardstick" library
+
+```{r}
+pred_val_sample |>
+  accuracy(truth = purchase,
+           estimate = ls_predict_binary)
+```
+
+
+```{r}
+pred_val_sample |>
+  accuracy(truth = purchase,
+           estimate = lr_predict_binary)
+```
+
+
+### True positiveand true negative rate
+
+
+Similarly, the true positive rate can be computed from the confusion matrix:
+
+```{r}
+conf_ls[1, 1] / sum(conf_ls[1, ])
+```
+
+```{r}
+conf_lr[1, 1] / sum(conf_ls[1, ])
+```
+
+
+or using the `sens()` or `sens_vec()` sensitivity functions from the yardstick package
+
+```{r}
+pred_val_sample |>
+  sens(truth = purchase,
+       estimate = ls_predict_binary)
+```
+
+```{r}
+pred_val_sample |>
+  sens(truth = purchase,
+       estimate = lr_predict_binary)
+```
+
+
+and the equivalent computations can be performed for the true negative rate (specificity)
+
+
+
+Similarly, the true negative rate can be computed from the confusion matrix:
+
+```{r}
+conf_ls[2, 2] / sum(conf_ls[2, ])
+```
+
+```{r}
+conf_lr[2, 2] / sum(conf_ls[2, ])
+```
+
+
+or using the `specificity()` or `spec_vec()` sensitivity functions from the yardstick package
+
+```{r}
+pred_val_sample |>
+  specificity(truth = purchase,
+              estimate = ls_predict_binary)
+```
+
+```{r}
+pred_val_sample |>
+  specificity(truth = purchase,
+              estimate = lr_predict_binary)
+```
+
+
+### Predicted probability densities
+
+
+
+We can also plot the distribution of the predicted probabilities using `geom_density()`
+
+
+```{r}
+pred_val_sample |>
+  ggplot() +
+  geom_density(aes(x = lr_predict, fill = purchase),
+               alpha = 0.5) +
+  scale_x_continuous(limits = c(0, 1))
+```
+
+Note, however, that using densities for so few samples is a bit misleading (there are only 5 data points in the "1" purchase class). A histogram would technically be more appropriate:
+
+```{r}
+pred_val_sample |>
+  ggplot() +
+  geom_histogram(aes(x = lr_predict, fill = purchase),
+                 position = "identity",
+                 alpha = 0.5) +
+  scale_x_continuous(limits = c(0, 1))
+```
+
+
+
+
+### ROC curves
+
+
+Computing ROC curves is easy with the "yardstick" `roc_curve()` function. Let's plot an ROC curve for the LS and logistic regression predictions on the same plot
+
+
+
+```{r}
+pred_val_sample |>
+  select(purchase, ls_predict, lr_predict) |>
+  pivot_longer(c("ls_predict", "lr_predict"), 
+               names_to = "fit", values_to = "pred") |>
+  group_by(fit) |>
+  roc_curve(purchase, pred) |>
+  autoplot()
+```
+
+
+The AUC of each plot can be computed using the `roc_auc()` or `roc_auc_vec()` function (depending on usage context -- the `_vec()` version must be used if it is *within* a dplyr function like `mutate()` or `summarise()`).
+
+```{r}
+pred_val_sample |>
+  select(purchase, ls_predict, lr_predict) |>
+  pivot_longer(c("ls_predict", "lr_predict"), 
+               names_to = "fit", values_to = "pred") |>
+  group_by(fit) |>
+  summarise(auc = roc_auc_vec(truth = purchase, estimate = pred))
+
+```
+
+
+## PCS evaluations
+
+### Predictability (evaluating binary predictions for the full validation set)
+
+Our predictability evaluation involves much the same computations as the previous section, but this time evaluated using the *entire* validation set, rather than just the sample of 20 validation set data points.
+
+
+
+Note that we will use a threshold of 0.161 (the proportion of training sessions that ended with a purchase, as computed in the code below) to convert the continuous response predictions (probabilities, in the case of logistic regression) to binary predictions.
+
+
+```{r}
+# compute the proportion of training observations in each class
+shopping_train_preprocessed |>
+  count(purchase) |>
+  mutate(prop = n / sum(n))
+```
+
+
+Let's evaluate the LS and logistic regression fits on the entire validation set. First, we need to compute the predictions for the validation set.
+
+```{r}
+pred_val <- tibble(purchase = shopping_val_preprocessed$purchase, 
+                   ls_predict = predict(ls_all, shopping_val_preprocessed),
+                   lr_predict = predict(lr_all, shopping_val_preprocessed,
+                                        type = "response"))
+print(pred_val, width = Inf)
+```
+
+Then we can compute many of the performance metrics at once:
+
+```{r}
+pred_val |>
+  pivot_longer(c("ls_predict", "lr_predict"), 
+               names_to = "fit", values_to = "pred") |>
+  mutate(pred_binary = factor(as.numeric(pred > 0.161), 
+                              levels = c(1, 0))) |>
+  group_by(fit) |>
+  summarise(accuracy = accuracy_vec(truth = purchase, 
+                                    estimate = pred_binary),
+            tp_rate = sens_vec(truth = purchase, 
+                               estimate = pred_binary),
+            tn_rate = spec_vec(truth = purchase, 
+                               estimate = pred_binary),
+            auc = roc_auc_vec(truth = purchase, 
+                              estimate = pred))
+```
+
+
+And we can plot ROC curves:
+
+
+```{r}
+pred_val |>
+  select(purchase, ls_predict, lr_predict) |>
+  pivot_longer(c("ls_predict", "lr_predict"), 
+               names_to = "fit", values_to = "pred") |>
+  group_by(fit) |>
+  roc_curve(purchase, pred) |>
+  autoplot()
+```
+
+
+As well as density plots for both LS and logistic regression:
+
+
+
+
+```{r}
+pred_val |>
+  ggplot() +
+  geom_density(aes(x = ls_predict, fill = purchase), alpha = 0.5) +
+  ggtitle("(a) LS")
+pred_val |>
+  ggplot() +
+  geom_density(aes(x = lr_predict, fill = purchase), alpha = 0.5) +
+  ggtitle("(b) Logistic regression")
+```
+
+
+
+### Stability to data perturbations
+
+
+To investigate the stability of each algorithm to data perturbations (specifically, bootstrap samples), we will first create 100 perturbed versions of the training dataset and store them in a tibble as a list column:
+
+```{r}
+set.seed(37698)
+shopping_data_perturbed <- tibble(iter = 1:100) %>%
+  rowwise() %>%
+  # for each row, create a bootstrap sampled version of the training data
+  mutate(data_train_preprocessed_perturbed = list(sample_frac(shopping_train_preprocessed, 1, replace = TRUE))) %>%
+  ungroup()
+
+shopping_data_perturbed
+
+```
+
+
+
+Then we can fit a LS and logistic regression fit to each perturbed dataset (and store these in list columns too). For each LS and logistic regression fit, we can then compute the validation set predictions and compute the relevant performance measures.
+
+First, we will do this for the LS fits:
+
+```{r}
+shopping_data_perturbed_ls <- shopping_data_perturbed |>
+  rowwise() |>
+  # fit a LS for each perturbed training dataset
+  mutate(ls = list(lm(parse_number(as.character(purchase)) ~ ., 
+                      data_train_preprocessed_perturbed))) |>
+  # create a list column of just the observed response vector 
+  mutate(true = list(factor(shopping_val_preprocessed$purchase, 
+                            levels = c(1, 0)))) |>
+  # compute a validation set prediction for each perturbed LS fit
+  mutate(pred = list(predict(ls, shopping_val_preprocessed))) |>
+  # compute the performance metrics for each fit
+  mutate(auc = roc_auc_vec(true, pred), 
+         tp_rate = sens_vec(true, factor(as.numeric(pred > 0.161), levels = c(1, 0))),
+         tn_rate = spec_vec(true, factor(as.numeric(pred > 0.161), levels = c(1, 0))),
+         accuracy = accuracy_vec(true, factor(as.numeric(pred > 0.161), levels = c(1, 0))),
+         .after = "pred") %>%
+  ungroup()
+# Look at the object we created
+print(shopping_data_perturbed_ls, width = Inf)
+```
+
+And then for the logistic regression fits:
+
+
+```{r}
+#| warning: false
+#| message: false
+shopping_data_perturbed_lr <- shopping_data_perturbed |>
+  rowwise() |>
+  # fit a logistic regression for each perturbed training dataset
+  mutate(lr = list(glm(factor(purchase, levels = c(0, 1)) ~ ., 
+                       data_train_preprocessed_perturbed,
+                       family = "binomial"))) |>
+  # create a list column of just the observed response vector 
+  mutate(true = list(factor(shopping_val_preprocessed$purchase, 
+                            levels = c(1, 0)))) |>
+  # compute a validation set prediction for each perturbed LS fit
+  mutate(pred = list(predict(lr, shopping_val_preprocessed,
+                             type = "response"))) |>
+  # compute the performance metrics for each fit
+  mutate(auc = roc_auc_vec(true, pred), 
+         tp_rate = sens_vec(true, factor(as.numeric(pred > 0.161), levels = c(1, 0))),
+         tn_rate = spec_vec(true, factor(as.numeric(pred > 0.161), levels = c(1, 0))),
+         accuracy = accuracy_vec(true, factor(as.numeric(pred > 0.161), levels = c(1, 0))),
+         .after = "pred") %>%
+  ungroup()
+# Look at the object we created
+print(shopping_data_perturbed_lr, width = Inf)
+```
+
+
+
+Then we can look at the distributions of the performance metrics we computed for the 100 perturbed fits. First, let's look at just the first 10 perturbed ROC curves. 
+
+
+```{r}
+
+gg_roc_ls_stab_data <- shopping_data_perturbed_ls %>%
+  # select just the relevant columns
+  select(iter, true, pred) %>%
+  # unnest the predictions and true purchase response from the list columns
+  unnest(c(iter, true, pred)) %>%
+  # compute the ROC curve for each perturbed set of predictions
+  group_by(iter) %>%
+  roc_curve(true, pred) %>%
+  autoplot() +
+  theme(legend.position = "none") +
+  ggtitle("(a) LS")
+
+gg_roc_lr_stab_data <- shopping_data_perturbed_lr %>%
+  # select just the relevant columns
+  select(iter, true, pred) %>%
+  # unnest the predictions and true purchase response from the list columns
+  unnest(c(iter, true, pred)) %>%
+  # compute the ROC curve for each perturbed set of predictions
+  group_by(iter) %>%
+  roc_curve(true, pred) %>%
+  autoplot() +
+  theme(legend.position = "none") +
+  ggtitle("(b) Logistic regression")
+
+gg_roc_ls_stab_data + gg_roc_lr_stab_data
+```
+
+
+The ROC curves seem very stable.
+
+
+Next, let's look at the distribution of the other performance measures using boxplots.
+
+
+```{r}
+shopping_data_perturbed_ls |>
+  # select the relevant columns (and create a "fit" column)
+  transmute(iter, tp_rate, tn_rate, accuracy, fit = "LS") |>
+  # add the rows for the logistic regression fit
+  rbind(transmute(shopping_data_perturbed_lr,
+                  iter, tp_rate, tn_rate, accuracy, fit = "Logistic reg")) |>
+  pivot_longer(c(tp_rate, tn_rate, accuracy), 
+               names_to = "measure", values_to = "value") |>
+  # make sure that the fits and measures appear in the same order as in the book
+  mutate(fit = fct_inorder(fit),
+         measure = fct_inorder(measure)) |>
+  ggplot() +
+  geom_boxplot(aes(x = fit, y = value)) +
+  facet_wrap(~measure)
+```
+
+Lastly, let's look at the distributions of the coefficients themselves. To do that, we need to extract the coefficients from the perturbed LS fits. However, since the coefficients are not inherently on the same scale, we need to either standardize the coefficients themselves (e.g., using the bootstrap), or we need to standardize the features before we generate the LS fit. Since it is computationally easier to take the latter approach, the code below does exactly that:
+
+
+```{r}
+perturbed_data_coefs_ls <- shopping_data_perturbed |>
+  rowwise() |>
+  # create a standardized version of each perturbed dataset
+  mutate(data_train_preprocessed_perturbed_std = 
+           list(mutate(data_train_preprocessed_perturbed,
+                       across(where(is.numeric), ~(. - mean(.)) / sd(.))))) |>
+  # fit a LS to each standardized perturbed training dataset
+  mutate(ls = list(lm(parse_number(as.character(purchase)) ~ ., 
+                      data_train_preprocessed_perturbed_std))) |>
+  # extract just the coefficients
+  transmute(iter, coefs = list(enframe(ls$coefficients, 
+                                       value = "coefficient", 
+                                       name = "variable"))) |>
+  # undo the list column structure
+  unnest(coefs) |>
+  filter(variable != "(Intercept)") 
+
+# compute the perturbed coefficients for logistic regression
+perturbed_data_coefs_lr <- shopping_data_perturbed |>
+  rowwise() |>
+  # create a standardized version of each perturbed dataset
+  mutate(data_train_preprocessed_perturbed_std = 
+           list(mutate(data_train_preprocessed_perturbed,
+                       across(where(is.numeric), ~(. - mean(.)) / sd(.))))) |>
+  # fit a LS to each standardized perturbed training dataset
+  mutate(lr = list(glm(factor(purchase, levels = c(0, 1)) ~ ., 
+                       data_train_preprocessed_perturbed_std, 
+                       family = "binomial"))) |>
+  # extract just the coefficients
+  transmute(iter, coefs = list(enframe(lr$coefficients, 
+                                       value = "coefficient", 
+                                       name = "variable"))) |>
+  # undo the list column structure
+  unnest(coefs) |>
+  filter(variable != "(Intercept)") 
+```
+
+
+Next, we can use boxplots to visualize the distributions of the largest (in absolute value) coefficients for each fit (note that in the book, we arrange the LS plot in the same order as the logistic regression plot, but we haven't done that here).
+
+```{r}
+# plot the logistic regression coefficients
+gg_perturbed_data_coefs_lr <- perturbed_data_coefs_lr |>
+  # arrange the coefficients in decreasing order of size
+  group_by(variable) |>
+  mutate(mean_coef = abs(mean(coefficient))) |>
+  ungroup() |>
+  arrange(desc(mean_coef)) |>
+  # filter to just the top 20 features
+  mutate(variable = fct_inorder(variable)) |>
+  mutate(var_order = as.numeric(variable)) %>%
+  filter(var_order <= 20)  %>%
+  # plot the distributions of the coefficients
+  ggplot() +
+  geom_boxplot(aes(x = variable, y = coefficient)) +
+  geom_hline(yintercept = 0) +
+  theme(axis.text.x = element_text(angle = 90, 
+                                   hjust = 1, 
+                                   vjust = 0.5), 
+        panel.grid.major.x = element_line(color = "grey90")) +
+  ggtitle("Logistic regression")
+
+
+
+# plot the LS coefficients
+gg_perturbed_data_coefs_ls <- perturbed_data_coefs_ls |>
+  # arrange the coefficients in decreasing order of size
+  group_by(variable) |>
+  mutate(mean_coef = abs(mean(coefficient))) |>
+  ungroup() |>
+  arrange(desc(mean_coef)) |>
+  # filter to just the top 20 features
+  mutate(variable = fct_inorder(variable)) |>
+  mutate(var_order = as.numeric(variable)) %>%
+  filter(var_order <= 20)  %>%
+  # plot the distributions of the coefficients
+  ggplot() +
+  geom_boxplot(aes(x = variable, y = coefficient)) +
+  geom_hline(yintercept = 0) +
+  theme(axis.text.x = element_text(angle = 90, 
+                                   hjust = 1, 
+                                   vjust = 0.5), 
+        panel.grid.major.x = element_line(color = "grey90")) +
+  ggtitle("LS")
+
+
+# arrange the plots on top of one another using patchwork syntax
+gg_perturbed_data_coefs_ls / gg_perturbed_data_coefs_lr
+```
+
+
+
+### Stability to cleaning/pre-processing judgment calls
+
+
+
+The judgment calls that we will consider are:
+
+
+1. Converting the numeric variables (such as `browser`, `region`, and `operating_system`) to categorical variables, or leaving them in a numeric format (just in case there is some meaningful order to the levels that we don't know about).
+
+2. Converting the categorical `month` variable to a numeric format (since there is a natural ordering to the months), or leaving it in a categorical format (which will be turned into one-hot encoded dummy variables during pre-processing).
+
+3. Applying a log-transformation to the page visit and duration variables (because this makes the distributions look more symmetric, and may help improve predictive performance), or leaving them un-transformed.
+
+4. Removing very extreme sessions (e.g., that visited over 400 product-related pages in a single session, or spent more than 12 hours on product-related pages in a single session) that may be bots, versus leaving them in the data. Note that we chose the thresholds that we use to define a potential "bot" session based on a visualization of the distributions of these variables.
+
+
+Since each judgment call above has two options (TRUE or FALSE), so there are a total of $2^4 = 16$ different judgment call combinations that we will consider in this section. 
+
+The code below creates an object that contains a list column with each perturbed dataset.
+
+First, we will create a grid of all of the judgment call options.
+
+```{r}
+numeric_to_cat = c(TRUE, FALSE)
+month_numeric <- c(TRUE, FALSE)
+log_page <- c(TRUE, FALSE)
+remove_extreme <- c(TRUE, FALSE)
+param_options <- expand_grid(numeric_to_cat,
+                             month_numeric,
+                             log_page,
+                             remove_extreme)
+```
+
+Then we will create a version of the pre-processed dataset per each of the judgment call combination options. Note that unlike for the data perturbations (which were all based on the "default" pre-processed training dataset) where we could use the "default" validation dataset, we will need to explicitly create perturbed versions of the pre-processed validation data to match each perturbed version of the pre-processed training data.
+
+```{r}
+shopping_jc_perturbed <- param_options %>% 
+  rowwise() %>%
+  # add training data list column
+  mutate(data_train_preprocessed_perturbed = 
+           list(preprocessShoppingData(shopping_train,
+                                    .numeric_to_cat = numeric_to_cat,
+                                    .month_numeric = month_numeric,
+                                    .log_page = log_page,
+                                    .remove_extreme = remove_extreme)),
+         .before = 1) %>%
+  # create a version of the training data cat levels for matching val set to train set
+  mutate(shopping_train_preprocessed_perturbed_nodummy = 
+           list(preprocessShoppingData(shopping_train, 
+                                    .numeric_to_cat = numeric_to_cat,
+                                    .month_numeric = month_numeric,
+                                    .log_page = log_page,
+                                    .remove_extreme = remove_extreme,
+                                    .dummy = FALSE))) %>%
+  # extract the levels to use for ensuring the validation sets match the training set
+  mutate(browser_levels = 
+           list(levels(shopping_train_preprocessed_perturbed_nodummy$browser)),
+         operating_systems_levels = 
+           list(levels(shopping_train_preprocessed_perturbed_nodummy$operating_systems)),
+         traffic_type_levels = 
+           list(levels(shopping_train_preprocessed_perturbed_nodummy$traffic_type))) %>%
+  # add validation data list column
+  mutate(data_val_preprocessed_perturbed = 
+           list(preprocessShoppingData(shopping_val,
+                                    .numeric_to_cat = numeric_to_cat,
+                                    .month_numeric = month_numeric,
+                                    .log_page = log_page,
+                                    .remove_extreme = remove_extreme, 
+                                    # make sure val columns match train columns
+                                    .column_selection = colnames(data_train_preprocessed_perturbed),
+                                    .operating_systems_levels = operating_systems_levels, 
+                                    .browser_levels = browser_levels, 
+                                    .traffic_type_levels = traffic_type_levels)),
+         .after = "data_train_preprocessed_perturbed") 
+
+shopping_jc_perturbed
+```
+
+
+
+
+
+Then we can fit a LS and logistic regression fit to each perturbed dataset (and store these in list columns too). For each LS and logistic regression fit, we can then compute the validation set predictions and compute the relevant performance measures.
+
+First, we will do this for the LS fits:
+
+```{r}
+shopping_jc_perturbed_ls <- shopping_jc_perturbed |>
+  # create a single variable that dictates the judgment call combination
+  unite("jc_options", numeric_to_cat:remove_extreme, remove = FALSE) |>
+  rowwise() |>
+  # fit a LS for each perturbed training dataset
+  mutate(ls = list(lm(parse_number(as.character(purchase)) ~ ., 
+                      data_train_preprocessed_perturbed))) |>
+  # create a list column of just the observed response vector 
+  mutate(true = list(factor(data_val_preprocessed_perturbed$purchase, 
+                            levels = c(1, 0)))) |>
+  # compute a validation set prediction for each perturbed LS fit
+  mutate(pred = list(predict(ls, data_val_preprocessed_perturbed))) |>
+  # compute the performance metrics for each fit
+  mutate(auc = roc_auc_vec(true, pred), 
+         tp_rate = sens_vec(true, factor(as.numeric(pred > 0.161), levels = c(1, 0))),
+         tn_rate = spec_vec(true, factor(as.numeric(pred > 0.161), levels = c(1, 0))),
+         accuracy = accuracy_vec(true, factor(as.numeric(pred > 0.161), levels = c(1, 0))),
+         .after = "pred") %>%
+  ungroup()
+# Look at the object we created
+print(shopping_jc_perturbed_ls, width = Inf)
+```
+
+And then for the logistic regression fits:
+
+
+```{r}
+#| warning: false
+#| message: false
+shopping_jc_perturbed_lr <- shopping_jc_perturbed |>
+  # create a single variable that dictates the judgment call combination
+  unite("jc_options", numeric_to_cat:remove_extreme, remove = FALSE) |>
+  rowwise() |>
+  # fit a logistic regression for each perturbed training dataset
+  mutate(lr = list(glm(factor(purchase, levels = c(0, 1)) ~ ., 
+                       data_train_preprocessed_perturbed,
+                       family = "binomial"))) |>
+  # create a list column of just the observed response vector 
+  mutate(true = list(factor(data_val_preprocessed_perturbed$purchase, 
+                            levels = c(1, 0)))) |>
+  # compute a validation set prediction for each perturbed LS fit
+  mutate(pred = list(predict(lr, data_val_preprocessed_perturbed,
+                             type = "response"))) |>
+  # compute the performance metrics for each fit
+  mutate(auc = roc_auc_vec(true, pred), 
+         tp_rate = sens_vec(true, factor(as.numeric(pred > 0.161), levels = c(1, 0))),
+         tn_rate = spec_vec(true, factor(as.numeric(pred > 0.161), levels = c(1, 0))),
+         accuracy = accuracy_vec(true, factor(as.numeric(pred > 0.161), levels = c(1, 0))),
+         .after = "pred") %>%
+  ungroup()
+# Look at the object we created
+print(shopping_jc_perturbed_lr, width = Inf)
+```
+
+
+
+Then we can look at the distributions of the performance metrics we computed for the 100 perturbed fits. First, let's look at just the first 10 perturbed ROC curves. 
+
+
+```{r}
+
+gg_roc_ls_stab_jc <- shopping_jc_perturbed_ls %>%
+  # select just the relevant columns
+  select(jc_options, true, pred) %>%
+  # unnest the predictions and true purchase response from the list columns
+  unnest(c(true, pred)) %>%
+  # compute the ROC curve for each perturbed set of predictions
+  group_by(jc_options) %>%
+  roc_curve(true, pred) %>%
+  autoplot() +
+  ggtitle("(a) LS") +
+  theme(legend.position = "none")
+
+gg_roc_lr_stab_jc <- shopping_jc_perturbed_lr %>%
+  # select just the relevant columns
+  select(jc_options, true, pred) %>%
+  # unnest the predictions and true purchase response from the list columns
+  unnest(c(true, pred)) %>%
+  # compute the ROC curve for each perturbed set of predictions
+  group_by(jc_options) %>%
+  roc_curve(true, pred) %>%
+  autoplot() +
+  ggtitle("(b) Logistic regression") +
+  theme(legend.position = "none")
+
+gg_roc_ls_stab_jc + gg_roc_lr_stab_jc
+```
+
+
+Notice how the ROC curves seem very stable.
+
+
+Next, let's look at the distribution of the other performance measures using boxplots.
+
+
+```{r}
+shopping_jc_perturbed_ls |>
+  # select the relevant columns (and create a "fit" column)
+  transmute(jc_options, tp_rate, tn_rate, accuracy, fit = "LS") |>
+  # add the rows for the logistic regression fit
+  rbind(transmute(shopping_jc_perturbed_lr,
+                  jc_options, tp_rate, tn_rate, accuracy, fit = "Logistic reg")) |>
+  pivot_longer(c(tp_rate, tn_rate, accuracy), 
+               names_to = "measure", values_to = "value") |>
+  # make sure that the fits and measures appear in the same order as in the book
+  mutate(fit = fct_inorder(fit),
+         measure = fct_inorder(measure)) |>
+  ggplot() +
+  geom_boxplot(aes(x = fit, y = value)) +
+  facet_wrap(~measure)
+```
+
+
+We can also compare these performance measures across different judgment call options:
+
+```{r}
+# look at the distribution of AUC across different performance measures
+shopping_jc_perturbed_ls |>
+  arrange(desc(auc)) |>
+  select(numeric_to_cat:remove_extreme, auc) |>
+  pivot_longer(c('numeric_to_cat',
+                 'month_numeric',
+                 'log_page',
+                 'remove_extreme')) |>
+  ggplot() +
+  geom_boxplot(aes(x = value, y = auc)) +
+  facet_wrap(~name)
+# look at the distribution of AUC across different performance measures
+shopping_jc_perturbed_lr |>
+  arrange(desc(auc)) |>
+  select(numeric_to_cat:remove_extreme, auc) |>
+  pivot_longer(c('numeric_to_cat',
+                 'month_numeric',
+                 'log_page',
+                 'remove_extreme')) |>
+  ggplot() +
+  geom_boxplot(aes(x = value, y = auc)) +
+  facet_wrap(~name)
+
+```
+
+
+Overall, it seems like the `log_page` judgment call is the only one that seems to make much of a difference, in that when we *do* log-transform the page variables, we tend to have fits with *lower* AUCs, however, the decrease in AUC is not too extreme.
+
+
+Lastly, let's look at the distributions of the coefficients themselves. To do that, we need to extract the coefficients from the perturbed LS fits. However, since the coefficients are not inherently on the same scale, we need to either standardize the coefficients themselves (e.g., using the bootstrap), or we need to standardize the features before we generate the LS fit. Since it is computationally easier to take the latter approach, the code below does exactly that:
+
+
+```{r}
+perturbed_jc_coefs_ls <- shopping_jc_perturbed |>
+  # create a single variable that dictates the judgment call combination
+  unite("jc_options", numeric_to_cat:remove_extreme) |>
+  rowwise() |>
+  # create a standardized version of each perturbed dataset
+  mutate(data_train_preprocessed_perturbed_std = 
+           list(mutate(data_train_preprocessed_perturbed,
+                       across(where(is.numeric), ~(. - mean(.)) / sd(.))))) |>
+  # fit a LS to each standardized perturbed training dataset
+  mutate(ls = list(lm(parse_number(as.character(purchase)) ~ ., 
+                      data_train_preprocessed_perturbed_std))) |>
+  # extract just the coefficients
+  transmute(jc_options, coefs = list(enframe(ls$coefficients, 
+                                       value = "coefficient", 
+                                       name = "variable"))) |>
+  # undo the list column structure
+  unnest(coefs) |>
+  filter(variable != "(Intercept)") 
+
+# compute the perturbed coefficients for logistic regression
+perturbed_jc_coefs_lr <- shopping_jc_perturbed |>
+  # create a single variable that dictates the judgment call combination
+  unite("jc_options", numeric_to_cat:remove_extreme) |>
+  rowwise() |>
+  # create a standardized version of each perturbed dataset
+  mutate(data_train_preprocessed_perturbed_std = 
+           list(mutate(data_train_preprocessed_perturbed,
+                       across(where(is.numeric), ~(. - mean(.)) / sd(.))))) |>
+  # fit a LS to each standardized perturbed training dataset
+  mutate(lr = list(glm(factor(purchase, levels = c(0, 1)) ~ ., 
+                       data_train_preprocessed_perturbed_std, 
+                       family = "binomial"))) |>
+  # extract just the coefficients
+  transmute(jc_options, coefs = list(enframe(lr$coefficients, 
+                                       value = "coefficient", 
+                                       name = "variable"))) |>
+  # undo the list column structure
+  unnest(coefs) |>
+  filter(variable != "(Intercept)") 
+```
+
+
+Next, we can use boxplots to visualize the distributions of the largest (in absolute value) coefficients for each fit (note that in the book, we arrange the LS plot in the same order as the logistic regression plot, but we haven't done that here).
+
+```{r}
+# plot the logistic regression coefficients
+gg_perturbed_jc_coefs_lr <- perturbed_jc_coefs_lr |>
+  # arrange the coefficients in decreasing order of size
+  group_by(variable) |>
+  mutate(mean_coef = abs(mean(coefficient))) |>
+  ungroup() |>
+  arrange(desc(mean_coef)) |>
+  # filter to just the top 20 features
+  mutate(variable = fct_inorder(variable)) |>
+  mutate(var_order = as.numeric(variable)) %>%
+  filter(var_order <= 20)  %>%
+  # plot the distributions of the coefficients
+  ggplot() +
+  geom_boxplot(aes(x = variable, y = coefficient)) +
+  geom_hline(yintercept = 0) +
+  theme(axis.text.x = element_text(angle = 90, 
+                                   hjust = 1, 
+                                   vjust = 0.5), 
+        panel.grid.major.x = element_line(color = "grey90")) +
+  ggtitle("Logistic regression")
+
+
+
+# plot the LS coefficients
+gg_perturbed_jc_coefs_ls <- perturbed_jc_coefs_ls |>
+  # arrange the coefficients in decreasing order of size
+  group_by(variable) |>
+  mutate(mean_coef = abs(mean(coefficient))) |>
+  ungroup() |>
+  arrange(desc(mean_coef)) |>
+  # filter to just the top 20 features
+  mutate(variable = fct_inorder(variable)) |>
+  mutate(var_order = as.numeric(variable)) %>%
+  filter(var_order <= 20)  %>%
+  # plot the distributions of the coefficients
+  ggplot() +
+  geom_boxplot(aes(x = variable, y = coefficient)) +
+  geom_hline(yintercept = 0) +
+  theme(axis.text.x = element_text(angle = 90, 
+                                   hjust = 1, 
+                                   vjust = 0.5), 
+        panel.grid.major.x = element_line(color = "grey90")) +
+  ggtitle("LS")
+
+
+# arrange the plots on top of one another using patchwork syntax
+gg_perturbed_jc_coefs_ls / gg_perturbed_jc_coefs_lr
+```
+
+When looking at the coefficients it seems as though the coefficient of exit rate is less stable to the judgment calls than the other variables.
+
+
+
