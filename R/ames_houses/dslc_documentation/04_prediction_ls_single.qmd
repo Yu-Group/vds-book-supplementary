@@ -1,0 +1,473 @@
+---
+title: "[Chapter 9] Predicting sale price in Ames using LAD and LS"
+subtitle: "[DSLC stages]: Analysis"
+format: 
+  html:
+    css: theme.css
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+
+The following code sets up the libraries and creates cleaned and pre-processed training, validation and test data that we will use in this document.
+
+```{r}
+#| message: false
+#| warning: false
+
+# loading libraries
+library(tidyverse)
+library(janitor)
+library(L1pack)
+library(lubridate)
+library(yardstick)
+library(scales)
+library(patchwork)
+# cleaning and pre-processing the Ames data
+source("functions/prepareAmesData.R")
+# list all objects (and custom functions) that exist in our environment
+ls()
+
+```
+
+## Single predictor fits
+
+### LAD fit to the sample of 10 houses
+
+Let's first demonstrate generating a LAD fit for the sample of 10 houses. 
+
+First let's create the sample of 10 houses that we used in the book.
+
+```{r}
+set.seed(589119)
+sample_ames <- ames_orig |>
+  filter(PID %in% ames_train_clean$pid) |>
+  sample_n(10)
+# create a clean version of the preview dataset
+sample_ames_clean <- ames_train_clean |>
+  filter(pid %in% sample_ames$PID) |>
+  select(sale_price, gr_liv_area)
+```
+
+Let's plot the living area against sale price using a scatterplot.
+
+```{r}
+sample_ames_clean |>
+  ggplot() +
+  geom_point(aes(x = gr_liv_area, y = sale_price))
+```
+
+Next, we can fit a LAD line as follows:
+
+```{r}
+lad_sample <- lad(sale_price ~ gr_liv_area, 
+                  sample_ames_clean, 
+                  method = "EM")
+lad_sample
+```
+
+
+Note the syntax `y \sim x` means predict `y` using `x` as a predictor variable. The variable on the left is the response and the variable on the right is the predictive feature.
+
+
+
+We can plot our LAD fitted line on our scatterplot:
+
+```{r}
+sample_ames_clean |>
+  ggplot() +
+  geom_point(aes(x = gr_liv_area, y = sale_price)) +
+  geom_abline(intercept = lad_sample$coefficients[1],
+              slope = lad_sample$coefficients[2])
+```
+
+And we can predict the price of a 2000$ft^2$ house as follows (note that we rounded each coefficient to the nearest integer in the book, so the prediction is slightly different):
+
+
+```{r}
+predict(lad_sample, tibble(gr_liv_area = 2000))
+```
+
+
+### LS fit to the sample of 10 houses
+
+To apply least squares to the 10 training data houses, we use the `lm()` function. 
+
+
+We can fit a LS line as follows:
+
+```{r}
+ls_sample <- lm(sale_price ~ gr_liv_area, 
+                  sample_ames_clean)
+ls_sample
+```
+
+We can similarly plot our LS fitted line on our scatterplot on top of the LAD line (the two lines are very similar):
+
+```{r}
+sample_ames_clean |>
+  ggplot() +
+  geom_point(aes(x = gr_liv_area, y = sale_price)) +
+  geom_abline(intercept = lad_sample$coefficients[1],
+              slope = lad_sample$coefficients[2], linetype = "dashed") +
+  geom_abline(intercept = ls_sample$coefficients[1],
+              slope = ls_sample$coefficients[2])
+```
+
+And we can predict the price of a 2000$ft^2$ house as follows (note that we rounded each coefficient to the nearest integer in the book, so the prediction is slightly different):
+
+
+```{r}
+predict(ls_sample, tibble(gr_liv_area = 2000))
+```
+
+
+### LS and LAD fit to the full training set (single predictor)
+
+Let's now fit LS and LAD to the entire training dataset using sale price as the sole predictor variable.
+
+```{r}
+lad_area <- lad(sale_price ~ gr_liv_area,
+                ames_train_preprocessed,
+                method = "EM")
+lad_area
+```
+
+```{r}
+ls_area <- lm(sale_price ~ gr_liv_area,
+                ames_train_preprocessed)
+ls_area
+```
+
+And we can plot both lines on a scatterplot:
+
+```{r}
+ames_train_preprocessed |>
+  ggplot(aes(x = gr_liv_area, y = sale_price)) + 
+  geom_point(alpha = 0.4) + 
+  geom_abline(intercept = ls_area$coefficients[1], 
+              slope = ls_area$coefficient[2]) +
+  geom_abline(intercept = lad_area$coefficients[1], 
+              slope = lad_area$coefficient[2], 
+              linetype = "dashed")  +
+  scale_y_continuous("Sale price", 
+                     labels = dollar_format()) +
+  scale_x_continuous("Living area") 
+```
+
+
+
+### Training performance
+
+Below we create a tibble containing the observed and predicted sale price for each training set house.
+
+
+```{r}
+pred_train_df <- tibble(true = ames_train_preprocessed$sale_price,
+                      ls_pred = predict(ls_area, ames_train_preprocessed),
+                      lad_pred = predict(lad_area, ames_train_preprocessed))
+# look at the first 6 rows
+head(pred_train_df)
+```
+
+Then let's pivot this tibble to a longer form so that we can simultaneously apply (using `group_by()` and `summarise()`) the rMSE, MAE, MAD, correlation, and $R^2$ evaluations to each algorithm (the `x_vec()` functions are from the yardstick R package, but there is no yardstick function for computing the correlation and MAD, so we compute these "manually"). 
+
+```{r}
+pred_train_df |>
+  pivot_longer(c("ls_pred", "lad_pred"), 
+               names_to = "algorithm", 
+               values_to = "pred") |>
+  group_by(algorithm) |>
+  summarise(rmse = rmse_vec(truth = true, estimate = pred),
+            mae = mae_vec(truth = true, estimate = pred),
+            mad = median(abs(true - pred)),
+            cor = cor(true, pred),
+            rsq = rsq_vec(truth = true, estimate = pred))
+```
+
+Across all metrics, the two algorithms are fairly similar, but, unsurprisingly, the LS algorithm looks better when evaluating using the rMSE, whereas the LAD algorithm looks better when evaluating using the MAE and MAD. This is unsurprising because the LS algorithm is designed to minimize the squared loss (which the rMSE computes), while the LAD algorithm is designed to minimize the absolute value loss (which the MAE and MAD compute). 
+
+
+In @fig-pred-true-plot we also plot the predicted versus observed sale price responses for the training data, and add a diagonal line corresponding to the perfect prediction. The two algorithms yield very similar predictions to one another, and the predictions themselves are fairly similar to the observed responses.
+
+```{r}
+#| label: fig-pred-true-plot
+#| fig-cap: "Scatterplots of the predicted and true sale price values for the LAD and LS algorithms for the training data"
+pred_train_df |>
+  pivot_longer(c("ls_pred", "lad_pred"), 
+               names_to = "algorithm", 
+               values_to = "pred") |>
+  ggplot() +
+  geom_point(aes(x = true, y = pred), 
+             alpha = 0.5) +
+  geom_abline(intercept = 0, slope = 1) +
+  scale_x_continuous(name = "Observed sale price",
+                     breaks = 100000 * c(1, 3, 5, 7),
+                     limits = c(0, 800000), 
+                     labels = paste0("$", c(1, 3, 5, 7), "00,000")) +
+  scale_y_continuous(name = "Predicted sale price",
+                     breaks = 100000 * c(1, 3, 5, 7),
+                     limits = c(0, 800000),
+                     labels = paste0("$", c(1, 3, 5, 7), "00,000")) +
+  coord_equal() +
+  facet_wrap(~algorithm) 
+```
+
+
+### PCS evaluation
+
+#### Predictability (validation performance)
+
+While the training performance is informative, if we want to get a sense of how well the algorithm would perform on future data we actually need to evaluate the algorithms on the validation set (which is chosen to be as similar as possible to the future data). Recall that we used a time-split to separate the dataset into training, validation and test sets.
+
+Let's repeat the analysis above, but this time for the validation set houses.
+
+
+First we need to generate predictions for the validation set houses:
+
+```{r}
+pred_val_df <- tibble(true = ames_val_preprocessed$sale_price,
+                      ls_pred = predict(ls_area, ames_val_preprocessed),
+                      lad_pred = predict(lad_area, ames_val_preprocessed))
+# look at the first 6 rows
+head(pred_val_df)
+```
+
+Then we can compute the performance measures for our validation set predictions:
+
+```{r}
+pred_val_df |>
+  pivot_longer(c("ls_pred", "lad_pred"), 
+               names_to = "algorithm", 
+               values_to = "pred") |>
+  group_by(algorithm) |>
+  summarise(rmse = rmse_vec(truth = true, estimate = pred),
+            mae = mae_vec(truth = true, estimate = pred),
+            mad = median(abs(true - pred)),
+            cor = cor(true, pred),
+            rsq = rsq_vec(truth = true, estimate = pred))
+```
+
+Again, the performance for the two algorithms are very similar to one another, and again we see that the LS algorithm performs best in terms of the rMSE measure, but the LAD algorithm performs best in terms of the MAE and MAD measure (the two algorithms have identical performance in terms of the correlation and $R^2$ measures).
+
+In @fig-val-pred-true-plot we also plot the predicted versus observed sale price responses for the training data, and add a diagonal line corresponding to the perfect prediction. Again, the two algorithms yield very similar predictions to one another on the validation set (just as they did on the training set). The performance on the validation set overall is a bit worse than the performance was on the training set houses (which is to be expected).
+
+
+```{r}
+#| label: fig-val-pred-true-plot
+#| fig-cap: "Scatterplots of the predicted and true sale price values for the LAD and LS algorithms applied to the validation data"
+pred_val_df |>
+  pivot_longer(c("ls_pred", "lad_pred"), 
+               names_to = "algorithm", 
+               values_to = "pred") |>
+  ggplot() +
+  geom_point(aes(x = true, y = pred), alpha = 0.5, col = "grey20") +
+  geom_abline(intercept = 0, slope = 1) +
+  scale_x_continuous(name = "Observed sale price",
+                     #limits = c(50000, 650000),
+                     breaks = 100000 * c(1, 3, 5),
+                     limits = c(0, 600000), 
+                     labels = paste0("$", c(1, 3, 5), "00,000")) +
+  scale_y_continuous(name = "Predicted sale price",
+                     #limits = c(50000, 650000),
+                     breaks = 100000 * c(1, 3, 5),
+                     limits = c(0, 600000),
+                     labels = paste0("$", c(1, 3, 5), "00,000")) +
+  coord_equal() +
+  facet_wrap(~algorithm) 
+```
+
+
+
+#### Stability to data perturbations
+
+
+To assess the stability of our data to appropriate perturbations in the data, we first need to decide what makes an "appropriate" perturbation. That is, what type of data perturbation (e.g., adding random noise, or performing sampling) most resembles the way that the data *could* have been measured or collected differently, as well as how these results will be applied in the future. 
+
+
+While the Ames housing data does not correspond to a random sample from a greater population of houses, each house is more-or-less exchangeable, meaning that a random sampling technique would be a reasonable perturbation, so we will draw 100 boostrap samples of the original data. 
+
+Moreover, it is plausible that the living area measurements involve a slight amount of measurement error, although we do not have a realistic sense of how much. To really stress-test our results, we choose to add another perturbation to the data that involves adding some random noise to 30% of the `gr_liv_area` measurements. Since the standard deviation of the living area is approximately 500, we decide to add or subtract a random number between 0 and 250 (i.e. add noise up to half a standard deviation) to 30% of `gr_liv_area` observations.
+
+Since we will be repeating this analysis many times, we will write a function that will take an Ames dataset, and return a perturbed version of it.
+
+```{r}
+perturbAmes <- function(.ames_data, 
+                        .perturb_gr_liv_area = FALSE) {
+  perturbed_ames <- .ames_data |>
+    # create a binary variable that indicates which 30% of the area values to perturb
+    mutate(perturb_area = rbernoulli(n(), p = 0.3) * .perturb_gr_liv_area) |>
+    # conduct a bootstrap sample
+    sample_frac(1, replace = TRUE) |>
+    rowwise() |>
+    # perturb the gr_liv_area variable
+    mutate(gr_liv_area = if_else(perturb_area == 1 & .perturb_gr_liv_area, 
+                                 # add some number between -250 and 250
+                                 gr_liv_area + as.integer(round(runif(1, -250, 250))), 
+                                 # or else, do not perturb the living area
+                                 gr_liv_area)) |>
+    # undo rowwise()
+    ungroup() |>
+    # remove unnecessary binary variable
+    select(-perturb_area)
+  return(perturbed_ames)
+}
+```
+
+
+Below we create a tibble with a list column containing the 100 perturbed versions of the training data. 
+
+```{r}
+set.seed(82634)
+ames_data_perturbed <- tibble(iter = 1:100) |>
+  rowwise() |>
+  mutate(data_train_perturbed = list(perturbAmes(ames_train_preprocessed, 
+                                                 .perturb_gr_liv_area = TRUE))) |>
+  ungroup()
+
+ames_data_perturbed
+```
+
+Then we can define a tibble that has a list column containing each relevant LS and LAD model
+
+```{r}
+perturbed_fit_area <- ames_data_perturbed |>
+  rowwise() |>
+  mutate(ls = list(lm(sale_price ~ gr_liv_area, data_train_perturbed)),
+         lad = list(lad(sale_price ~ gr_liv_area, data_train_perturbed))) |>
+  ungroup()
+perturbed_fit_area
+```
+
+
+We can then generate sale price predictions for each house in the validation set using each perturbed LS and LAD fit.
+
+```{r}
+perturbed_fit_area_pred <- perturbed_fit_area |>
+  rowwise() |>
+  transmute(iter, 
+            true_val = list(ames_val_preprocessed$sale_price),
+            pred_val_ls = list(predict(ls, ames_val_preprocessed)),
+            pred_val_lad = list(predict(lad, ames_val_preprocessed))) |>
+  ungroup()
+perturbed_fit_area_pred
+```
+
+
+
+And compute the rMSE, MAE and $R^2$ for the validation set for each perturbed algorithm
+
+```{r}
+perturbed_fit_area_pred_performance <- perturbed_fit_area_pred |> 
+  pivot_longer(c("pred_val_ls", "pred_val_lad"), 
+               names_to = "fit", 
+               values_to = "pred_val") |>
+  group_by(iter, fit) |>
+  rowwise() |>
+  mutate(rMSE = rmse_vec(true_val, pred_val),
+         MAE = mae_vec(true_val, pred_val),
+         MAD = median(abs(true_val - pred_val)),
+         cor = cor(true_val, pred_val))
+perturbed_fit_area_pred_performance
+```
+
+
+
+Then we can visualize the distribution of the performance metrics across the 100 perturbed iterations:
+
+
+
+```{r}
+perturbed_fit_area_pred_performance |>
+  pivot_longer(c("rMSE", "MAE", "MAD", "cor"), 
+               names_to = "metric", 
+               values_to = "value") |>
+  ggplot() +
+  geom_boxplot(aes(x = fit, y = value)) +
+  facet_wrap(~metric, scales = "free", ncol = 2)
+```
+
+
+Overall (by realizing that the range of each y-axis is fairly narrow), it seems like both algorithms are fairly stable in terms of these performance metrics.
+
+
+
+
+Let's next examine the stability to data perturbations in terms of the individual predictions for individual validation set houses using prediction stability plots, which present the range of predictions for each individual observation on the x-axis as a line segment (ranging from the smallest to the largest). The intervals that contain the true response are colored blue.
+
+To do this, we will write a function that will take the perturbed predictions data frame for each (validation) house, create a range of predictions, and produce a plot of the true response (y-axis) against the range of response predictions (x-axis).
+
+
+
+```{r}
+# compute the interval (max and min prediction) for each validation house
+predStabilityPlot <- function(.perturbed_pred_df,
+                              .true_var,
+                              .pred_var,
+                              .title = NULL) {
+  
+  perturbed_pred_interval <- .perturbed_pred_df |> 
+    pivot_longer({{ .pred_var }}, 
+                 names_to = "fit", values_to = "pred") |>
+    group_by(pid, fit) |>
+    # compute the range (interval) of predictions for each response
+    summarise(true = unique({{ .true_var }}),
+              min_pred = min(pred),
+              max_pred = max(pred)) |>
+    ungroup() 
+  
+  perturbed_pred_interval |>
+    # plot the intervals
+    ggplot() +
+    geom_abline(intercept = 0, slope = 1, alpha = 0.5) +
+    geom_segment(aes(y = true, yend = true, x = min_pred, xend = max_pred),
+                 alpha = 0.5) +
+    scale_y_continuous(name = "Observed sale response", labels = label_dollar()) +
+    scale_x_continuous(name = "Predicted sale response range", labels = label_dollar())  +
+    ggtitle(.title)
+}
+
+```
+
+Then we can produce the prediction stability plots for LS and LAD as follows
+
+```{r}
+#| message: false
+#| warning: false
+#| layout-ncol: 2
+perturbed_fit_area_pred |>
+  select(true_val, pred_val_ls) |>
+  rowwise() |>
+  # add a house identifier (pid) column 
+  mutate(pid = list(ames_val_preprocessed$pid)) |>
+  # expand the nested tibble into a regular tibble
+  unnest(cols = c(true_val, pred_val_ls, pid)) |>
+  # create the prediction stability plot
+  predStabilityPlot(.true_var = true_val, 
+                    .pred_var = pred_val_ls, 
+                    .title = "LS")
+perturbed_fit_area_pred |>
+  select(true_val, pred_val_lad) |>
+  rowwise() |>
+  # add a house identifier (pid) column 
+  mutate(pid = list(ames_val_preprocessed$pid)) |>
+  # expand the nested tibble into a regular tibble
+  unnest(cols = c(true_val, pred_val_lad, pid)) |> 
+  # create the prediction stability plot
+  predStabilityPlot(.true_var = true_val, 
+                    .pred_var = pred_val_lad, 
+                    .title = "LAD")
+```
+
+It seems like the range of predicted responses for each house is fairly narrow (i.e., the predictions are fairly stable), especially for houses in the middle of the price range, but is slightly wider (i.e., the predictions are somewhat less stable) for houses with higher predicted sale prices. 
+

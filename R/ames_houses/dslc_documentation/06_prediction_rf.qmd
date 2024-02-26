@@ -1,0 +1,672 @@
+---
+title: "[Chapter 12] Predicting sale price in Ames using CART and RF"
+subtitle: "[DSLC stages]: Analysis"
+format: 
+  html:
+    css: theme.css
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+
+The following code sets up the libraries and creates cleaned and pre-processed training, validation and test data that we will use in this document.
+
+```{r}
+#| message: false
+#| warning: false
+
+# loading libraries
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(yardstick)
+library(scales)
+library(patchwork)
+library(fastDummies)
+library(rpart)
+library(glmnet)
+library(ranger)
+# cleaning and pre-processing the Ames data
+source("functions/prepareAmesData.R")
+source("functions/predStabilityPlot.R")
+# list all objects (and custom functions) that exist in our environment
+ls()
+
+```
+
+Since CART and RF can both use categorical features directly, let's create a version of the Ames data with the original categorical variables (i.e., without dummy variables) that we can use in this document.
+
+```{r}
+ames_train_preprocessed_cat <- 
+  preProcessAmesData(ames_train_clean,
+                     neighborhood_dummy = FALSE, 
+                     convert_categorical = "none")
+ames_val_preprocessed_cat <- 
+  preProcessAmesData(ames_val_clean,
+                     neighborhood_dummy = FALSE,
+                     convert_categorical = "none",
+                     column_selection = colnames(ames_train_preprocessed_cat),
+                     neighborhood_levels = levels(ames_train_preprocessed_cat$neighborhood))
+```
+
+## A manual CART demonstration
+
+In this section, we will demonstrate one example of manually compute the first CART split for a small sample of 30 training houses.
+
+First, let's create the sample of 30 training houses.
+
+```{r}
+set.seed(3321)
+ames_train_sample <- ames_train_preprocessed_cat %>%
+  filter(neighborhood %in% c("NAmes", "OldTown", "CollgCr")) %>%
+  select(gr_liv_area, neighborhood, sale_price) %>%
+  sample_n(30)
+ames_train_sample
+```
+
+
+
+Then, we can create a tibble with the set of potential split questions (each defined based on a variable and a threshold or value) we will consider for this small example:
+
+```{r}
+ames_questions <- tribble(~variable, ~value,
+                          "gr_liv_area", "1625",
+                          "gr_liv_area", "1428",
+                          "gr_liv_area", "905",
+                          "neighborhood", "NAmes",
+                          "neighborhood", "CollgCr")
+```
+
+And define a function for computing the variance split measure for each split option.
+
+
+```{r}
+getSplitVar <- function(variable, value) {
+  # identify which observations answer "yes" to the split question
+  if (variable == "gr_liv_area") {
+    yes <- ames_train_sample[[variable]] < parse_number(value)
+  } else if (variable == "neighborhood") {
+    yes <- ames_train_sample[[variable]] == value
+  }
+  # compute the variance of the responses for the observations that answer "yes"
+  var_yes <- var(ames_train_sample$sale_price[yes])
+  # compute the variance of the responses for the observations that answer "no"
+  var_no <- var(ames_train_sample$sale_price[!yes])
+  # compute a weighted sum of the two variances
+  var_split <- (sum(yes) / nrow(ames_train_sample)) * var_yes + (sum(!yes) / nrow(ames_train_sample)) * var_no 
+  
+  # create a nice character string describing of the current split question
+  if (variable == "gr_liv_area") {
+    split_rule <- paste0(variable, " < ", value)
+  } else if (variable == "neighborhood") {
+    split_rule <- paste0(variable, " = ", value)
+  }
+  # return the results
+  return(tibble(split = split_rule,
+                `variance measure` = round(var_split)))
+}
+
+```
+
+Then we can apply this function to the set of potential split questions
+
+```{r}
+map2_df(ames_questions$variable, ames_questions$value, 
+        function(.x, .y) getSplitVar(.x, .y))
+```
+
+and we see that the split question, `gr_liv_area < 1428` yields the lowest variance for these 30 training houses, and so this is the threshold rule that we will use to define the first split.
+
+
+Fortunately, you wouldn't have to do this manually yourself, since the `rpart()` function will do it for you (although it will consider a much broader range of split options than the set that we considered above). Below, you can see that the `rpart()` function similarly identifies `gr_liv_area < 1428` as the best split option.
+
+```{r}
+ames_example_cart <- rpart(sale_price ~ gr_liv_area, ames_train_sample)
+ames_example_cart
+```
+
+## Fitting CART and RF using the entire training set
+
+Below, we fit a CART algorithm using the entire training dataset using all of the available features.
+
+
+```{r}
+cart <- rpart(sale_price ~ ., ames_train_preprocessed_cat)
+```
+
+
+We can also fit a RF algorithm using the entire training dataset and all available features using the `ranger()` function from the ranger R package.
+
+```{r}
+set.seed(2783)
+rf <- ranger(sale_price ~ ., 
+             ames_train_preprocessed_cat)
+```
+
+
+## RF variable importance
+
+
+To extract the variable importance from the RF fit, you actually need to specify an `importance` argument when you train the RF algorithm.
+
+The code below retrains the RF algorithm to extract the permutation and the impurity importance measures.
+
+```{r}
+set.seed(2783)
+rf_permutation <- ranger(sale_price ~ ., 
+                         ames_train_preprocessed_cat, 
+                         importance = "permutation")
+set.seed(2783)
+rf_impurity <- ranger(sale_price ~ ., 
+                      ames_train_preprocessed_cat, 
+                      importance = "impurity")
+
+```
+
+Then the importance measure values for each variable can be extracted directly from the rf objects:
+
+```{r}
+rf_permutation$variable.importance
+rf_impurity$variable.importance
+```
+
+
+And we can visualize these importance measures using a bar plot:
+
+```{r}
+# put the two importance measures in a tibble
+tibble(variable = names(rf_permutation$variable.importance),
+       permutation = rf_permutation$variable.importance,
+       impurity = rf_impurity$variable.importance) |>
+  # arrange in order of the impurity measure
+  arrange(impurity) |>
+  # ensure that the variable names will appear in the correct order by fixing the factor level order
+  mutate(variable = fct_inorder(variable)) |>
+  # convert to a longer format so we can use facet_wrap 
+  pivot_longer(c("permutation", "impurity"), 
+               names_to = "measure",
+               values_to = "importance") |>
+  ggplot() +
+  # create bar plot
+  geom_col(aes(x = variable, y = importance)) +
+  # create a separate plot for each measure
+  facet_wrap(~measure, ncol = 1, scales = "free") +
+  # switch the x- and y-axes
+  coord_flip() +
+  theme_bw()
+```
+
+
+
+
+## A PCS evaluation of the CART and RF fits
+
+And we can then evaluate the predictability and stability of this CART fit!
+
+### Predictability
+
+Let's evaluate the CART fit using the validation set. This will involve generating validation set predictions, which we can then compare to the original LS (all) fit.
+
+First, let's create a version of the original LS fit
+
+```{r}
+ls_all <- lm(sale_price ~ ., ames_train_preprocessed)
+```
+
+Then we can put both our CART and LS predictions into a data frame (tibble).
+
+```{r}
+val_performance <- 
+  tibble(pid = ames_val_preprocessed$pid,
+         true = ames_val_preprocessed$sale_price,
+         pred_ls_all = predict(ls_all, ames_val_preprocessed),
+         pred_cart = predict(cart, ames_val_preprocessed_cat),
+         pred_rf = predict(rf, ames_val_preprocessed_cat)$prediction)
+```
+
+And we can evaluate the performance of each fit, and format the results in the table below:
+
+```{r}
+val_performance |>
+  pivot_longer(c("pred_ls_all", "pred_cart", "pred_rf"),
+               names_to = "fit", values_to = "pred", names_prefix = "pred_") |>
+  group_by(fit) |>
+  summarise(rmse = rmse_vec(true, pred),
+            mae = mae_vec(true, pred),
+            cor = cor(true, pred)) |>
+  arrange(cor)
+```
+
+
+Notice from the table above that the CART algorithm is *worse* across all measures than the LS fit. 
+
+
+### Stability to data perturbations
+
+
+To assess the stability of our data to appropriate perturbations in the data, we first need to decide what makes an "appropriate" perturbation. That is, what type of data perturbation (e.g., adding random noise, or performing subsampling) most resembles the way that the data *could* have been measured or collected differently, as well as how these results will be applied in the future. 
+
+
+While the Ames housing data does not correspond to a random sample from a greater population of houses, each house is more-or-less exchangeable, meaning that a random sampling technique would be a reasonable perturbation, so we will draw 100 bootstrap samples of the original data. 
+
+Moreover, it is plausible that the living area measurements involve a slight amount of measurement error, although we do not have a realistic sense of how much. To really stress-test our results, we choose to add another perturbation to the data that involves adding some random noise to 30% of the `gr_liv_area` measurements. Since the standard deviation of the living area is approximately 500, we decide to add or subtract a random number between 0 and 250 (i.e. add noise up to half a standard deviation) to 30% of `gr_liv_area` observations.
+
+Since we will be repeating this analysis many times, we will write a function that will take an Ames dataset, and return a perturbed version of it.
+
+```{r}
+perturbAmes <- function(.ames_data, 
+                        .perturb_gr_liv_area = FALSE) {
+  perturbed_ames <- .ames_data |>
+    # create a binary variable that indicates which 30% of the area values to perturb
+    mutate(perturb_area = rbernoulli(n(), p = 0.3) * .perturb_gr_liv_area) |>
+    # conduct a bootstrap sample
+    sample_frac(1, replace = TRUE) |>
+    rowwise() |>
+    # perturb the gr_liv_area variable
+    mutate(gr_liv_area = if_else(perturb_area == 1 & .perturb_gr_liv_area, 
+                                 # add some number between -250 and 250
+                                 gr_liv_area + as.integer(round(runif(1, -250, 250))), 
+                                 # or else, do not perturb the living area
+                                 gr_liv_area)) |>
+    # undo rowwise()
+    ungroup() |>
+    # remove unnecessary binary variable
+    select(-perturb_area)
+  return(perturbed_ames)
+}
+```
+
+
+Below we create a tibble with a list column containing the 100 perturbed versions of the training data. 
+
+```{r}
+set.seed(467824)
+ames_data_perturbed <- tibble(iter = 1:100) |>
+  rowwise() |>
+  mutate(data_train_perturbed = list(perturbAmes(ames_train_preprocessed, 
+                                                 .perturb_gr_liv_area = TRUE)))
+
+set.seed(467824)
+# add a version with the categorical variables
+# (use the same seed as above to ensure that the perturbations are the same)
+ames_data_perturbed <- ames_data_perturbed |>
+  mutate(data_train_perturbed_cat = list(perturbAmes(ames_train_preprocessed_cat, 
+                                                     .perturb_gr_liv_area = TRUE))) |>
+  ungroup()
+
+# look at the object
+ames_data_perturbed
+```
+
+Then we can define a tibble that has a list column containing each relevant LS fits in it:
+
+```{r}
+set.seed(287394)
+perturbed_data_rf <- ames_data_perturbed |>
+  rowwise() |>
+  mutate(ls_all = list(lm(sale_price ~ ., data_train_perturbed)),
+         cart = list(rpart(sale_price ~ ., data_train_perturbed_cat)),
+         rf = list(ranger(sale_price ~ ., data_train_perturbed_cat))) |>
+  ungroup()
+perturbed_data_rf
+```
+
+
+
+We can then generate sale price predictions for each house in the validation set using each perturbed LS fits.
+
+```{r}
+perturbed_data_pred <- perturbed_data_rf |>
+  rowwise() |>
+  transmute(iter, 
+            true_val = list(ames_val_preprocessed_cat$sale_price),
+            pred_val_ls_all = list(predict(ls_all, ames_val_preprocessed)),
+            pred_val_cart = list(predict(cart, ames_val_preprocessed_cat)),
+            pred_val_rf = list(predict(rf, ames_val_preprocessed_cat)$predictions)) |>
+  ungroup() |>
+  # add pid for filtering to a common 150 validation set houses
+  mutate(pid = list(ames_val_preprocessed$pid)) |>
+  # unnest the tibble
+  unnest(c(true_val, pid, 
+           pred_val_ls_all, pred_val_cart, pred_val_rf))
+perturbed_data_pred
+```
+
+
+
+
+
+Let's use the prediction stability plot function to visualize the range of perturbed predictions for 150 validation set houses for each fit. 
+
+
+```{r}
+#| label: fig-stab-data
+#| fig-cap: "Prediction stability plots showing the range of predictions for 150 randomly selected validation set data point across the 100 different LS fits with (a) one predictive feature (area), (b) five predictive features, and (c) all available predictive features, each trained on a different perturbed version of the training dataset."
+#| warning: false
+#| message: false
+set.seed(8674)
+val_sample_pid <- sample(ames_val_preprocessed$pid, 150)
+
+
+gg_stability_data_ls_all <- perturbed_data_pred |>
+  filter(pid %in% val_sample_pid) |>
+  predStabilityPlot(.true_var = true_val, .pred_var = pred_val_ls_all,
+                    .title = "LS (all)")
+
+gg_stability_data_cart <- perturbed_data_pred |>
+  filter(pid %in% val_sample_pid) |>
+  predStabilityPlot(.true_var = true_val, .pred_var = pred_val_cart,
+                    .title = "CART")
+
+
+gg_stability_data_rf <- perturbed_data_pred |>
+  filter(pid %in% val_sample_pid) |>
+  predStabilityPlot(.true_var = true_val, .pred_var = pred_val_rf,
+                    .title = "RF")
+
+
+gg_stability_data_ls_all + gg_stability_data_cart +
+  gg_stability_data_rf +
+  plot_layout(ncol = 2)
+```
+
+
+Clearly the CART algorithm is much *less* stable than the LS or RF algorithms, but the RF algorithm looks to have similar stability to the LS algorithm.
+
+The table below shows the average length of the intervals for each algorithm, which actually reveals that the RF algorithm is slightly more stable than the LS algorithm.
+
+
+
+```{r}
+perturbed_data_pred |>
+  pivot_longer(c("pred_val_ls_all", "pred_val_cart", "pred_val_rf"),
+               names_to = "fit", values_to = "pred_val", 
+               names_prefix = "pred_val_") |>
+  # for each house
+  group_by(pid, fit) |>
+  # compute the max-min
+  summarise(sd = sd(pred_val)) |>
+  ungroup() |>
+  group_by(fit) |>
+  summarise(mean_sd = mean(sd))
+```
+
+Note that these numbers might be slightly different to the numbers reported in the book, but they should be in the same ballpark.
+
+
+
+We can also investigate the distribution of the correlation performance across the data perturbations for each model. From the boxplots below, it is clear that the distribution of the correlation performance measure for the CART algorithm is much less stable to the data perturbations than for the LS and RF algorithms.
+
+
+```{r}
+perturbed_data_pred |>
+  pivot_longer(c(pred_val_ls_all, pred_val_cart, pred_val_rf), 
+               names_to = "fit", names_prefix = "pred_val_", 
+               values_to = "pred") |>
+  group_by(fit, iter) |>
+  summarise(cor = cor(true_val, pred)) |>
+  ggplot() +
+  geom_boxplot(aes(x = fit, y = cor))
+```
+
+
+### Stability to judgment call perturbations
+
+Next, we can compare the stability of each algorithm to the pre-processing judgment calls.
+
+
+
+
+
+```{r}
+# create the judgment call perturbation combinations
+param_options <- expand_grid(max_identical_thresh = c(0.65, 0.8, 0.95),
+                             n_neighborhoods = c(10, 20),
+                             impute_missing_categorical = c("other", "mode"),
+                             simplify_vars = c(TRUE, FALSE),
+                             transform_response = c("none", "log", "sqrt"),
+                             cor_feature_selection_threshold = c(0, 0.5),
+                             convert_categorical = c("numeric", "simplified_dummy", "dummy"))
+
+param_options |> print(width = Inf)
+```
+
+
+Then we need to create a cleaned/pre-processed version of the training and validation datasets for each combination of these judgment calls by adding list columns to the `param_options` tibble:
+
+```{r}
+# create the perturbed datasets in a list column
+ames_jc_perturbed <- param_options |> 
+  rowwise() |>
+  # add training data list column
+  mutate(data_train_perturbed = 
+           list(preProcessAmesData(ames_train_clean,
+                                   max_identical_thresh = max_identical_thresh,
+                                   n_neighborhoods = n_neighborhoods,
+                                   impute_missing_categorical = impute_missing_categorical,
+                                   simplify_vars = simplify_vars,
+                                   transform_response = transform_response,
+                                   cor_feature_selection_threshold = cor_feature_selection_threshold,
+                                   convert_categorical = convert_categorical))) |>
+  # add validation data list column
+  mutate(data_val_perturbed = 
+           list(preProcessAmesData(ames_val_clean,
+                                   max_identical_thresh = max_identical_thresh,
+                                   n_neighborhoods = n_neighborhoods,
+                                   # make sure the validation neighborhoods match the training neighborhoods
+                                   neighborhood_levels = map_chr(str_split(colnames(select(data_train_perturbed, contains("neighborhood"))), "neighborhood_"), ~.[2]),
+                                   impute_missing_categorical = impute_missing_categorical,
+                                   simplify_vars = simplify_vars,
+                                   transform_response = transform_response,
+                                   cor_feature_selection_threshold = cor_feature_selection_threshold,
+                                   convert_categorical = convert_categorical,
+                                   # make sure validation set cols match the training set cols
+                                   column_selection = colnames(data_train_perturbed), 
+                                   keep_pid = TRUE)))
+
+# look at the object we just created
+ames_jc_perturbed |> print(width = Inf)
+```
+
+
+
+
+
+
+Then we can essentially repeat the code from above, but for these judgment call-perturbed datasets. However, since the judgment calls primarily don't affect the single-predictor and 5-predictor fits, we will just focus on the LS (all predictor) fit and the lasso and ridge regularized fits.
+
+
+```{r}
+perturbed_jc_pred <- ames_jc_perturbed |>
+  rowwise() |>
+  # generate the LS (all) fit
+  mutate(ls_all = list(lm(sale_price ~ ., data_train_perturbed)),
+         cart = list(rpart(sale_price ~ ., data_train_perturbed)),
+         rf = list(ranger(sale_price ~ ., data_train_perturbed))) |>
+  mutate(pid = list(data_val_perturbed$pid),
+         true_val = list(data_val_perturbed$sale_price),
+         pred_val_ls_all = list(predict(ls_all, data_val_perturbed)),
+         pred_val_cart = list(predict(cart, data_val_perturbed)),
+         pred_val_rf = list(predict(rf, data_val_perturbed)$predictions)) |>
+  # if the perturbation involved a response transformation, we need to undo
+  # the transformation for the predictions so that they are comparable with 
+  # the untransformed versions
+  mutate(pred_val_ls_all = 
+           case_when(transform_response == "log" ~ list(exp(pred_val_ls_all)),
+                     transform_response == "sqrt" ~ list(pred_val_ls_all^2),
+                     transform_response == "none" ~ list(pred_val_ls_all))) |>
+  mutate(pred_val_cart = 
+           case_when(transform_response == "log" ~ list(exp(pred_val_cart)),
+                     transform_response == "sqrt" ~ list(pred_val_cart^2),
+                     transform_response == "none" ~ list(pred_val_cart))) |>
+  mutate(pred_val_rf = 
+           case_when(transform_response == "log" ~ list(exp(pred_val_rf)),
+                     transform_response == "sqrt" ~ list(pred_val_rf^2),
+                     transform_response == "none" ~ list(pred_val_rf))) |>
+  mutate(true_val = 
+           case_when(transform_response == "log" ~ list(exp(true_val)),
+                     transform_response == "sqrt" ~ list(true_val^2),
+                     transform_response == "none" ~ list(true_val))) |>
+  # remove columns we won't need anymore
+  select(-ls_all, -cart, -rf, -data_train_perturbed, -data_val_perturbed) |>
+  ungroup() |>
+  # unnest the tibble
+  unnest(c(pid, true_val,
+           pred_val_ls_all, pred_val_cart, pred_val_rf))
+
+# look at the object we've created
+perturbed_jc_pred |> print(width = Inf)
+```
+
+
+
+We next want to use it to visualize the range of perturbed predictions for 150 validation set houses for each fit. However, first, we should filter any particularly poorly performing fits. To identify whether there are any particularly poorly performing fits, let's compute the correlation predictive performance for each fit to each perturbed dataset and visualize their distributions across the different fits and judgment calls.
+
+```{r}
+perturbed_jc_correlations <- perturbed_jc_pred |>
+  # convert the data to long-form (create a single column for all predictions and 
+  # a fit/model identifier)
+  pivot_longer(cols = c("pred_val_ls_all", "pred_val_cart", "pred_val_rf"), 
+                names_to = "fit", values_to = "pred_val", 
+               names_prefix = "pred_val_") |>
+  group_by(fit, max_identical_thresh, n_neighborhoods, 
+                      simplify_vars, convert_categorical, transform_response,
+                       cor_feature_selection_threshold) |>
+  # compute the correlation performance for each fit
+  summarise(correlation = cor(true_val, pred_val)) 
+# look at the object
+perturbed_jc_correlations |> print(width = Inf)
+```
+
+Let's visualize these correlations against each of the judgment call options for each fit:
+
+```{r}
+#| label: fig-correlation-jc
+#| fig-cap: "Boxplots demonstrating the distributions of the LS, lasso, and ridge validation set correlation performance, where each algorithm is fit using various combinations of the following six pre-processing judgment calls: (a) converting ordered categorical variables to dummy variables, numeric variables, or a simplified version of the dummy variables, (b) the choice of missing value threshold above which to remove features, (c) the choice of how many neighborhoods to aggregate, (d) whether to simplify several variables, (e) whether to apply a log or square-root transformation to the response, and (f) whether to apply a correlation-based feature selection (a threshold of 0 corresponds to no feature selection)."
+#| message: false
+#| warning: false
+
+
+perturbed_jc_correlations |>
+  ungroup() |>
+  # convert all judgment call options to character variables
+  mutate(across(one_of("max_identical_thresh", "n_neighborhoods", 
+                       "simplify_vars", "convert_categorical", 
+                       "transform_response",
+                       "cor_feature_selection_threshold"), as.character)) |>
+  # create a long-form data frame with a single column for the judgment calls
+  pivot_longer(cols = c("max_identical_thresh", "n_neighborhoods", 
+                        "simplify_vars", "convert_categorical", 
+                        "transform_response", 
+                        "cor_feature_selection_threshold"), 
+               names_to = "judgment_call", values_to = "option") |>
+  # plot the correlations against the judgment call options for each fit
+  ggplot() +
+  theme_bw() +
+  geom_boxplot(aes(x = option, y = correlation, fill = fit)) +
+  facet_wrap(~judgment_call, scales = "free_x", ncol = 2) +
+  theme(legend.position = "top",
+        panel.grid.major.x = element_line(color = "grey90"), 
+        strip.background = element_rect(fill = "white"))
+```
+
+
+The CART algorithm is overall much less accurate than the other two, but none of the judgment calls seem to be affecting the accuracy all that much.
+
+
+Let's create a prediction stability plot for each fit
+
+```{r}
+#| label: fig-stab-jc
+#| fig-cap: "Prediction stability plots showing the range of predictions for 150 randomly selected validation set data point across the 100 different LS fits with (a) one predictive feature (area), (b) five predictive features, and (c) all available predictive features, each trained on a different cleaning/pre-processing judgment call-perturbed version of the training dataset."
+#| warning: false
+#| message: false
+
+
+gg_stability_jc_ls_all <- perturbed_jc_pred |>
+  # conduct predictability screening
+  left_join(filter(perturbed_jc_correlations, fit == "ls_all")) |>
+  select(-fit) |>
+  # filter to the 150 validation set houses
+  filter(pid %in% val_sample_pid) |>
+  # create the prediction stability plot
+  predStabilityPlot(.true_var = true_val, 
+                    .pred_var = pred_val_ls_all,
+                    .title = "LS (all predictors)")
+
+gg_stability_jc_cart <- perturbed_jc_pred |>
+  # conduct predictability screening
+  left_join(filter(perturbed_jc_correlations, fit == "cart")) |>
+  select(-fit) |>
+  # filter to the 150 validation set houses
+  filter(pid %in% val_sample_pid) |>
+  # create the prediction stability plot
+  predStabilityPlot(.true_var = true_val, 
+                    .pred_var = pred_val_cart, 
+                    .title = "CART")
+
+gg_stability_jc_rf <- perturbed_jc_pred |>
+  # conduct predictability screening
+  left_join(filter(perturbed_jc_correlations, fit == "rf")) |>
+  select(-fit) |>
+  # filter to the 150 validation set houses
+  filter(pid %in% val_sample_pid) |>
+  # create the prediction stability plot
+  predStabilityPlot(.true_var = true_val, 
+                    .pred_var = pred_val_rf,
+                    .title = "RF")
+
+gg_stability_jc_ls_all + gg_stability_jc_cart +
+  gg_stability_jc_rf + plot_spacer() +
+  plot_layout(ncol = 2)
+```
+
+
+The average SD of the perturbed predictions for each algorithm is shown below:
+
+
+
+```{r}
+perturbed_jc_pred |>
+  pivot_longer(c("pred_val_ls_all", "pred_val_cart", "pred_val_rf"),
+               names_to = "fit", values_to = "pred_val", 
+               names_prefix = "pred_val_") |>
+  # for each house
+  group_by(pid, fit) |>
+  # compute the max-min
+  summarise(sd = sd(pred_val)) |>
+  ungroup() |>
+  group_by(fit) |>
+  summarise(mean_sd = mean(sd))
+```
+
+Note that these numbers might be slightly different to the numbers reported in the book, but again, they should be in the same ballpark.
+
+
+Lastly, we can also investigate the distribution of the correlation performance across the cleaning/pre-processing judgment call perturbations for each model. From the boxplots below, this time it seems as though the RF fit yields much more stable correlation performance measure values than the LS and RF algorithms. 
+
+```{r}
+perturbed_jc_pred |>
+  pivot_longer(c(pred_val_ls_all, pred_val_cart, pred_val_rf), 
+               names_to = "fit", names_prefix = "pred_val_", 
+               values_to = "pred") |>
+  group_by(fit, 
+           # judgment call options
+           max_identical_thresh, n_neighborhoods, 
+           impute_missing_categorical, simplify_vars, 
+           transform_response, cor_feature_selection_threshold, 
+           convert_categorical) |>
+  summarise(cor = cor(true_val, pred)) |>
+  ggplot() +
+  geom_boxplot(aes(x = fit, y = cor))
+```

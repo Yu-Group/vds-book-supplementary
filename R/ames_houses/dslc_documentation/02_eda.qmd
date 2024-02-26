@@ -1,0 +1,287 @@
+---
+title: "[Chapter 8] Exploring the Ames housing data"
+subtitle: "[DSLC stages]: EDA"
+format: 
+  html:
+    css: theme.css
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+    df-print: kable
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+In this document, you will find the PCS workflow and code for conducting a thorough EDA of the Ames housing data. Note that each section in this document corresponds to an interesting trend and finding. We did not include every exploratory avenue and every exploratory plot we made in this document. 
+
+Following each interesting figure that we explore in this document, we conduct a PCS evaluation to demonstrate the stability, predictability of the take-away message of the figure.
+
+
+We examined and cleaned the Ames housing data in the file `01_cleaning.qmd`. In each subsequent file that uses the cleaned version of the data, it is good practice to load in the original "raw" (uncleaned) data, and then clean it and pre-process it using the cleaning function you wrote. It is often helpful to keep a copy of the original uncleaned data in your environment too. 
+
+
+Note that our pre-processing steps were primarily so that the data would play nice with the predictive algorithms. In general the initial clean data is useful for EDA (sometimes the pre-processed data is too, but we will focus on the clean data for now) to ensure that your perspective is not skewed by the pre-processing steps (such as imputation), but it is also helpful to explore the pre-processed data too since this is the data you will be using in your analysis. You will see us examine both datasets in this document. 
+
+```{r}
+#| message: false
+#| warning: false
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(cluster)
+library(fossil)
+library(superheat)
+# if library(superheat) doesn't work, you might first need to run:
+# library(devtools)
+# install_github("rlbarter/superheat")
+
+source("functions/prepareAmesData.R")
+# list all objects (and custom functions) that exist in our environment
+ls()
+```
+
+
+
+## High-level summary of the data
+
+
+Here are some histograms of the numeric variables (which we already saw in the cleaning doc).  
+
+```{r}
+#| fig-height: 14
+ames_train_clean %>%
+  select_if(is.numeric) %>%
+  select_if(~n_distinct(.) > 20) %>% 
+  pivot_longer(everything(), names_to = "variable") %>%
+  ggplot() +
+  geom_histogram(aes(x = value), col = "white") +
+  facet_wrap(~variable, scales = "free", ncol = 3)
+```
+
+
+The following table shows a random sample of 15 houses (this won't necessarily match the random sample that was in the book). 
+
+```{r}
+set.seed(28674)
+ames_train_clean %>% sample_n(15) 
+```
+
+```{r}
+set.seed(28674)
+ames_train_preprocessed %>% sample_n(15) 
+```
+
+
+### Correlation matrix
+
+The heatmap below shows the correlation relationship between the continuous numeric variables.
+
+```{r}
+#| fig-height: 8
+#| fig-width: 8
+ames_train_preprocessed %>%
+  select_if(is.numeric) %>%
+  select_if(~n_distinct(.) > 20) %>% 
+  cor %>%
+  superheat(heat.pal = c("white", "#18678B", "black"),
+            heat.pal.values = c(0, 0.7, 1), 
+            pretty.order.rows = TRUE, 
+            pretty.order.cols = TRUE, 
+            grid.hline.col = "white",
+            grid.vline.col = "white", 
+            bottom.label.text.angle = 90, 
+            bottom.label.size = 0.5)
+```
+
+
+What we can see is that there is a strong correlation between the `gr_liv_area` and `sale_price` (response) variable, as well as several other area-related variables (`garage_area`, `total_bsmt_sf`), and that the year-related variables are highly correlated (`garage_yr_blt`, `year_built`).
+
+
+## Exploring the response (sale price)
+
+Since our goal for this project is to predict sale price, let's take a closer look at the sale price variable.
+
+The distribution looks fairly clean, although it is skewed by a couple of particularly expensive houses. 
+
+```{r}
+ames_train_clean %>%
+  ggplot() +
+  geom_histogram(aes(x = sale_price))
+```
+
+One option that we explore in pre-processing is log-transforming the response variable. The log-transformed sale price variable is indeed a lot more symmetric (which sometimes can improve prediction performance):
+
+```{r}
+ames_train_clean %>%
+  ggplot() +
+  geom_histogram(aes(x = log(sale_price)))
+```
+
+
+## Realtionship with the response (sale price)
+
+Let's examine the relationship of several variables with sale price.
+
+First, let's compare the continuous variables with sale price using scatterplots:
+
+```{r}
+#| fig-height: 8
+ames_train_clean %>%
+  select_if(is.numeric) %>%
+  select(-any_of(c("order", "pid", "misc_val",
+                   "ms_sub_class"))) %>%
+  select_if(~n_distinct(.) > 20) %>%
+  pivot_longer(-c(sale_price), names_to = "variable", values_to = "value") %>%
+  ggplot() +
+  geom_point(aes(x = value, y = sale_price), alpha = 0.4) +
+  facet_wrap(~variable, scales = "free", ncol = 4)
+```
+
+The variables that leap out as being heavily related to living area are `gr_liv_area`, and the other area variables (`x1st_flr_sf`, `tot_bsmt_sf`). Several of these are removed in the "simplifying" pre-processing option though.
+
+We can also physically compute the correlation of each numeric variable with sale price and plot it as bars to quantify these observations. This time, we will look at all the pre-processed variables:
+
+
+```{r}
+#| fig-height: 10
+cor_df <- cor(select_if(ames_train_preprocessed, is.numeric))[, "sale_price"] %>%
+  enframe %>%
+  dplyr::filter(!(name %in% c("sale_price_binary", "sale_price", "pid"))) %>%
+  arrange(value) %>%
+  mutate(name = fct_inorder(name)) 
+cor_df %>% ggplot() +
+  geom_col(aes(x = name, y = value), fill = "grey80", col = "white") +
+  # negative names
+  geom_text(aes(x = name, y = -0.005, label = name), 
+            hjust = 1, vjust = 0.5, size = 3,
+            data = dplyr::filter(cor_df, value < 0),
+            col = "grey30") +
+  # positive names
+  geom_text(aes(x = name, y = 0.005, label = name), 
+            hjust = 0, vjust = 0.5, size = 3,
+            data = dplyr::filter(cor_df, value > 0),
+            col = "grey30") +
+  geom_hline(yintercept = c(-0.5, 0, 0.5), col = "grey70") +
+  scale_y_continuous("Correlation with sale price",
+                     limits = c(-0.5, 0.8)) +
+  scale_x_discrete(NULL) +
+  theme_classic() +
+  theme(#axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    axis.line.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.x = element_line(color = "grey90"),
+    axis.ticks.x = element_line(color = "grey90")) +
+  coord_flip()
+
+
+```
+
+
+Next, we can look at whether there is a relationship with the discrete numeric variables using boxplots:
+
+```{r}
+#| fig-height: 8
+ames_train_clean %>%
+  select_if(is.numeric) %>%
+  select_if(~n_distinct(.) < 13) %>%
+  select(-x3ssn_porch, -pool_area) %>%
+  mutate(sale_price = ames_train_clean$sale_price) %>%
+  pivot_longer(-c(sale_price), names_to = "variable", values_to = "value") %>%
+  ggplot() +
+  geom_boxplot(aes(x = value, group = value, y = sale_price), alpha = 0.5) +
+  facet_wrap(~variable, scales = "free", ncol = 4)
+```
+
+The `overall_qual` variable stands out as having a strong relationship with the sale price, but it doesn't look like a linear relationship. Perhaps it looks more linear with the log-transformed sale price variable?
+
+
+
+### Log-transformed sale price
+
+Let's reproduce these plots, but with the log-transformed sale price response variable.
+
+
+```{r}
+#| fig-height: 8
+ames_train_clean %>%
+  select_if(is.numeric) %>%
+  select(-order, -pid, -misc_val,
+         -ms_sub_class) %>%
+  select_if(~n_distinct(.) > 20) %>%
+  mutate(log_sale_price = log(sale_price)) %>%
+  select(-sale_price) %>%
+  pivot_longer(-c(log_sale_price), names_to = "variable", values_to = "value") %>%
+  ggplot() +
+  geom_point(aes(x = value, y = log_sale_price), alpha = 0.4) +
+  facet_wrap(~variable, scales = "free", ncol = 4)
+```
+
+The linear relationships for the log-transformed sale price variable look even stronger now, and so too does the relationship between `log(sale price)` and `overall_qual` below:
+
+```{r}
+#| fig-height: 8
+ames_train_clean %>%
+  select_if(is.numeric) %>%
+  select_if(~n_distinct(.) < 13) %>%
+  select(-x3ssn_porch, -pool_area) %>%
+  mutate(log_sale_price = log(ames_train_clean$sale_price)) %>%
+  pivot_longer(-c(log_sale_price), names_to = "variable", values_to = "value") %>%
+  ggplot() +
+  geom_boxplot(aes(x = value, group = value, y = log_sale_price), alpha = 0.5) +
+  facet_wrap(~variable, scales = "free", ncol = 4)
+```
+
+
+## Comparing neighborhoods
+
+It might be interesting to see how the neighborhoods compare to one another. Below we print a map of Ames to provide some context.
+
+```{r}
+#| echo: false
+#| label: fig-ames-map
+#| fig-cap: "A map showing where the neighborhoods of Ames are located."
+knitr::include_graphics("figures/ames_map.png")
+```
+
+This map was taken from the [**Tidy Modeling with R** book](https://www.tmwr.org/) by Max Kuhn and Julia Silge, who also provide a predictive analysis of this dataset. The data that we have does not contain the latitude and longitude information, but they seemed to have a version that did!
+
+The center of the map which contains no houses corresponds to the university of Iowa.
+
+The boxplots below compare the sale price distribution across the neighborhoods.
+
+```{r}
+ames_train_clean %>%
+  group_by(neighborhood) %>%
+  mutate(mean_sale_price = mean(sale_price)) %>%
+  ungroup() %>%
+  arrange(desc(mean_sale_price)) %>%
+  mutate(neighborhood = fct_inorder(neighborhood)) %>%
+  ggplot() +
+  geom_boxplot(aes(x = neighborhood, y = sale_price)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+```
+
+
+
+Below we examine the size (`gr_liv_area`) for each neighborhood. It seems that not only are NoRidge and NridgHt the most expensive neighborhoods (above), they are also the neighborhoods with the largest houses:
+
+```{r}
+ames_train_clean %>%
+  group_by(neighborhood) %>%
+  mutate(mean_gr_liv_area = mean(gr_liv_area)) %>%
+  ungroup() %>%
+  arrange(desc(mean_gr_liv_area)) %>%
+  mutate(neighborhood = fct_inorder(neighborhood)) %>%
+  ggplot() +
+  geom_boxplot(aes(x = neighborhood, y = gr_liv_area)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+```
+

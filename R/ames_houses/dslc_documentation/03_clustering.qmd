@@ -1,0 +1,40 @@
+---
+title: "[Chapter 8] Clustering the Ames housing data"
+subtitle: "[DSLC stages]: Clustering"
+format: 
+  html:
+    css: theme.css
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+---
+
+
+In this document, you will conduct a cluster analysis of the Ames housing data. Our goal is to get a sense of what kinds of houses the data contains.
+
+
+
+```{r}
+#| message: false
+#| warning: false
+
+# note that if you load these libraries in the wrong order, the tidyverse 
+# function map() will not work
+library(patchwork)
+library(cluster)
+library(mclust)
+library(tidyverse)
+
+
+source("functions/prepareAmesData.R")
+# list all objects (and custom functions) that exist in our environment
+ls()
+```
+
+

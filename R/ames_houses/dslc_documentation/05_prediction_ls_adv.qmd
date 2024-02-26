@@ -1,0 +1,1274 @@
+---
+title: "[Chapter 10] Predicting sale price in Ames using LS"
+subtitle: "[DSLC stages]: Analysis"
+format: 
+  html:
+    css: theme.css
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+
+The following code sets up the libraries and creates cleaned and pre-processed training, validation and test data that we will use in this document.
+
+```{r}
+#| message: false
+#| warning: false
+
+# loading libraries
+library(tidyverse)
+library(janitor)
+library(L1pack)
+library(lubridate)
+library(yardstick)
+library(scales)
+library(patchwork)
+library(fastDummies)
+library(glmnet)
+# cleaning and pre-processing the Ames data
+source("functions/prepareAmesData.R")
+# list all objects (and custom functions) that exist in our environment
+ls()
+
+```
+
+## LS with multiple predictors
+
+
+First, let's fit the four-predictor version of the LS fit. 
+
+
+```{r}
+ls_multi4 <- lm(sale_price ~ gr_liv_area + year_built + overall_qual + bedroom_abv_gr, 
+                ames_train_preprocessed)
+
+ls_multi4
+```
+
+
+### Comparing coefficients
+
+Comparing the coefficients using the *theoretical* $t$-values can be done by applying the `summary()` function to the `ls_multi4` object (look at the `t value` column): 
+
+```{r}
+summary(ls_multi4)
+```
+
+However, in veridical data science we prefer to empirically estimate the standard deviation of the coefficients in order to compute the t-values, where $t_j = b_j / SD(b_j)$, e.g., using the bootstrap. 
+
+The following code uses the bootstrap (sampling with replacement) to create 1000 different perturbed versions of the data, computes a LS fit for each bootstrap sample, and reports the bootstrap coefficients in a nice tidy data frame (tibble):
+
+```{r}
+#| label: boot-ls
+set.seed(2678)
+boot_coefs <- map_df(1:1000, function(i) {
+  # compute a bootstrap sample
+  ames_boot <- ames_train_preprocessed |>
+    sample_frac(1, replace = TRUE) 
+  # fit LS
+  ls_multi4_boot <- lm(sale_price ~ gr_liv_area + year_built + 
+                         overall_qual + bedroom_abv_gr, 
+                       ames_boot)
+  # return the results in a nice data frame
+  return(enframe(ls_multi4_boot$coefficients, 
+                 name = "variable", 
+                 value = "coefficient"))
+}, .id = "boot") 
+
+boot_coefs
+```
+
+
+Then we can compute the standard deviation of each of the bootstrap coefficients, and use these standard deviation estimates to compute the standardized coefficients.
+
+
+```{r}
+boot_coefs |>
+  # compute the bootstrapped SD for each coefficient
+  group_by(variable) |>
+  summarise(sd = sd(coefficient)) |>
+  ungroup() |>
+  # add the original coefficients
+  left_join(enframe(ls_multi4$coefficients, 
+                    name = "variable", 
+                    value = "coefficient"), 
+            by = "variable") |>
+  # compute the standardized coefficient
+  mutate(standardized_coefficient = coefficient / sd) 
+```
+
+## Pre-processing: one-hot encoding
+
+To create one-hot encoded binary (dummy) variables, you can either do it "manually" (e.g., using `muate()`) or you can use the `dummy_cols()` function from the fastDummies R package.
+
+
+If the original "clean" (but not pre-processed) data looks like this:
+
+```{r}
+head(ames_train_clean)
+```
+
+Then the version with dummy variables for the specified columns looks like this (the binary dummy variable columns are placed at the end):
+
+```{r}
+# identify factor columns
+fct_vars <- ames_train_clean |>
+  select(where(is.factor)) |>
+  colnames()
+# create dummy columns
+ames_train_clean |>
+  dummy_cols(select_columns = fct_vars,
+             remove_first_dummy = TRUE, 
+             remove_selected_columns = TRUE) |>
+  head()
+```
+
+
+The `remove_first_dummy = TRUE` argument specifies that the first level of the factor variable will be the reference level and no binary variable is created for it.
+
+We included code for creating dummy variables in the `functions/preProcessAmesData.R` file. (Some variables are manually converted to binary dummy variables, and others are converted using `dummy_cols()`.)
+
+We could then include these dummy variables in a `lm()` fit, but it is helpful to note that `lm()` will actually create these dummy variables for you if you provide a categorical feature. 
+
+For example:
+
+```{r}
+lm(sale_price ~ gr_liv_area + year_built + 
+     overall_qual + bedroom_abv_gr + 
+     neighborhood, 
+   data = ames_train_clean)
+```
+
+## LS with all predictive features
+
+If you have a lot of predictive features and you want to include all of them in your linear fit, fortunately you don't have to manually write out the name of each variable in your `lm()` function, because you can use the `.` short-hand notation. The following code uses all (pre-processed) predictive features to compute a LS fit for sale price:
+
+```{r}
+ls_all <- lm(sale_price ~ ., ames_train_preprocessed)
+ls_all
+```
+
+
+## Feature selection
+
+Identifying which variables are highly correlated with the response can be done using the `cor()` function:
+
+```{r}
+cor_sale_price <- ames_train_preprocessed |>
+  # select just the numeric columns
+  select(where(is.numeric)) |>
+  # compute the correlation matrix
+  cor() |>
+  # convert the cor matrix to a tibble and add a "variable" column that
+  # contains the variable rownames
+  as_tibble(rownames = "variable") |>
+  # select just the sale price correlation column
+  select(variable, cor_sale_price = sale_price) |>
+  # remove the correlation of sale price with itself
+  filter(variable != "sale_price") |>
+  # arrange in descending (absolute value) order
+  arrange(desc(abs(cor_sale_price))) 
+cor_sale_price
+```
+
+
+We can count how many are greater than 0.5:
+
+```{r}
+cor_select <- cor_sale_price |>
+  filter(cor_sale_price >= 0.5)
+cor_select
+```
+
+Which shows that 13 of the correlations are greater than (or equal to) 0.5.
+
+You could train a LS fit just using these features as follows:
+
+```{r}
+ls_cor <- lm(sale_price ~ ., 
+             data = select(ames_train_preprocessed, 
+                           sale_price, cor_select$variable))
+ls_cor
+```
+
+## Ridge and lasso
+
+### Choosing $\lambda$ using cross-validation
+
+Using 10-fold cross-validation to choose the ridge hyperparameter can be done using the `cv.glmnet()` function from the glmnet R package.
+
+The glmnet package functions all require matrix inputs, so we first need to create those:
+
+```{r}
+x <- ames_train_preprocessed |>
+  dplyr::select(-sale_price) |>
+  # standardize the features
+  mutate_all(~(. - mean(.)) / sd(.)) |>
+  as.matrix()
+y <- ames_train_preprocessed |>
+  pull(sale_price)
+```
+
+Then we can use the `cv.glmnet()` function (`alpha = 0` corresponds to ridge, whereas `alpha = 1` corresponds to lasso) to identify reasonable hyperparameter values
+
+```{r}
+set.seed(4848)
+ridge_cv <- cv.glmnet(x = x, y = y, 
+                      type.measure="mse", 
+                      nfolds = 10,
+                      alpha = 0)
+
+lasso_cv <- cv.glmnet(x = x, y = y, 
+                      type.measure="mse", 
+                      nfolds = 10,
+                      alpha = 1)
+```
+
+This is the sequence of $\lambda$ values used for ridge
+
+```{r}
+ridge_cv$lambda
+```
+
+
+and the $\lambda.min$ (value that yielded the smallest MSE) is
+
+```{r}
+ridge_cv$lambda.min
+```
+
+which is the smallest $\lambda$ value (this often happens), which is why we actually tend to use $\lambda_{1SE}$ (the largest value of $\lambda$ such that the MSE is within one standard error of the minimum):
+
+```{r}
+ridge_cv$lambda.1se
+```
+
+Similarly for the lasso:
+
+```{r}
+lasso_cv$lambda.1se
+```
+
+(Note that in the book, we reported the logarithm of these values). 
+
+We can visualize the results for each $\lambda$ in the following plots:
+
+```{r}
+gg_ridge_cv <- data.frame(lambda = ridge_cv$glmnet.fit$lambda,
+                          mse = sqrt(ridge_cv$cvm),
+                          mse_upper = sqrt(ridge_cv$cvup),
+                          mse_lower = sqrt(ridge_cv$cvlo)) |>
+  ggplot() +
+  geom_line(aes(x = log(lambda), y = mse)) +
+  geom_errorbar(aes(x = log(lambda), ymax = mse_upper, ymin = mse_lower),
+                color = "grey50") +
+  geom_vline(xintercept = log(ridge_cv$lambda.min), linetype = "dashed",
+             color = "grey50") +
+  geom_vline(xintercept = log(ridge_cv$lambda.1se), linetype = "dashed",
+             color = "grey50") +
+  geom_text(aes(x = x, y = y, label = label),
+            data = data.frame(x = log(ridge_cv$lambda.min) + 0.1,
+                              y = 75000,
+                              label = "lambda[min]"),
+            col = "grey40", size = 3, hjust = 0, parse = T) +
+  geom_text(aes(x = x, y = y, label = label),
+            data = data.frame(x = log(ridge_cv$lambda.1se) + 0.1,
+                              y = 75000,
+                              label = "lambda[SE]"),
+            col = "grey40", size = 3, hjust = 0, parse = T) +
+  theme_classic() +
+  labs(y = "Average 10-fold CV MSE", title = "(a) Ridge",
+       x = expression(paste('log(', lambda, ")")))
+
+gg_lasso_cv <- data.frame(lambda = lasso_cv$glmnet.fit$lambda,
+                          mse = sqrt(lasso_cv$cvm),
+                          mse_upper = sqrt(lasso_cv$cvup),
+                          mse_lower = sqrt(lasso_cv$cvlo)) |>
+  ggplot() +
+  geom_line(aes(x = log(lambda), y = mse)) +
+  geom_errorbar(aes(x = log(lambda), ymax = mse_upper, ymin = mse_lower),
+                color = "grey50") +
+  geom_vline(xintercept = log(lasso_cv$lambda.min), linetype = "dashed",
+             color = "grey50") +
+  geom_vline(xintercept = log(lasso_cv$lambda.1se), linetype = "dashed",
+             color = "grey50") +
+  geom_text(aes(x = x, y = y, label = label),
+            data = data.frame(x = log(lasso_cv$lambda.min) + 0.1,
+                              y = 75000,
+                              label = "lambda[min]"),
+            col = "grey40", size = 3, hjust = 0, parse = T) +
+  geom_text(aes(x = x, y = y, label = label),
+            data = data.frame(x = log(lasso_cv$lambda.1se) + 0.1,
+                              y = 75000,
+                              label = "lambda[SE]"),
+            col = "grey40", size = 3, hjust = 0, parse = T) +
+  theme_classic() +
+  labs(y = "Average 10-fold CV MSE", title = "(b) Lasso",
+       x = expression(paste('log(', lambda, ")")))
+
+# align the plots in two rows using patchwork syntax
+gg_ridge_cv / gg_lasso_cv
+```
+
+
+
+### Fitting ridge and lasso models
+
+Having chosen the $\lambda$ values for ridge and lasso using CV, we can fit the ridge and lasso models.
+
+Note that the syntax is a bit different from `lm()`. Moreover, rather than providing just the selected $\lambda$ value, it is recommended to provide the entire sequence of $\lambda$ values (which will create a fit for each $\lambda$ value provided), and then extract the fit for the relevant lambdas.
+
+```{r}
+# train the lasso fits for a sequence of lambdas
+lasso_fit <- glmnet(x = x, y = y, lambda = lasso_cv$lambda, alpha = 1)
+# identify which fits correspond to the relevant lambda values
+lasso_lambda_min_index <- which(lasso_fit$lambda == lasso_cv$lambda.min)
+lasso_lambda_1se_index <- which(lasso_fit$lambda == lasso_cv$lambda.1se)
+```
+
+To view the coefficients, you can extract the relevant column from the `beta` object from the lasso glmnet object. The lasso fit for the $\lambda_{1SE}$ hyperparameter is thus:
+
+```{r}
+lasso_fit$beta[, lasso_lambda_1se_index]
+```
+
+Notice that several of the variables coefficients are exactly equal to 0!
+
+Predictions can be generated using the same `predict()` function as before. For instance, below we compute the predictions for the lasso fit using the $\lambda_{1SE}$ hyperparameter using the *training data*.
+
+```{r}
+predict(lasso_fit, x)[, lasso_lambda_1se_index] 
+```
+
+We have just shown the code for lasso fit, but the ridge fit is equivalent (you just need to change the `glmnet()` argument to `alpha = 0`):
+
+
+```{r}
+# train the lasso fits for a sequence of lambdas
+ridge_fit <- glmnet(x = x, y = y, lambda = ridge_cv$lambda, alpha = 0)
+# identify which fits correspond to the relevant lambda values
+ridge_lambda_min_index <- which(ridge_fit$lambda == ridge_cv$lambda.min)
+ridge_lambda_1se_index <- which(ridge_fit$lambda == ridge_cv$lambda.1se)
+```
+
+
+```{r}
+ridge_fit$beta[, ridge_lambda_1se_index]
+```
+
+
+### Exploring coefficient shrinkage
+
+Let's visualize how much each regularization algorithm shrinks each coefficient.
+
+To do that, we need to extract the coefficients from each regularized fit, as well as the original fit with all features. 
+
+First, we will re-compute the original fit using standardized variables so that the coefficients are comparable to the ridge and lasso coefficients):
+
+```{r}
+# create a standardized version of the pre-processed training data
+ames_train_preprocessed_std <- ames_train_preprocessed |>
+  dplyr::select(-sale_price) |>
+  mutate_all(~(. - mean(.)) / sd(.)) |>
+  mutate(sale_price = ames_train_preprocessed$sale_price)
+
+# compute an unregularized fit
+ls_all_std <- lm(sale_price ~ ., ames_train_preprocessed_std)
+# extract the coefficients
+ls_coefs <- ls_all_std$coefficients[-1] |>
+  enframe(name = "variable", value = "coefficient") 
+```
+
+
+Then we can extract the coefficients from each of the regularized fits
+
+```{r}
+# lasso lambda_min
+ls_lasso_min_coefs <- lasso_fit$beta[, lasso_lambda_min_index] |>
+  enframe(name = "variable", value = "coefficient") |>
+  mutate(algorithm = "Lasso with min")
+# lasso lambda_1se
+ls_lasso_1se_coefs <- lasso_fit$beta[, lasso_lambda_1se_index] |>
+  enframe(name = "variable", value = "coefficient") |>
+  mutate(algorithm = "Lasso with 1SE")
+# ridge lambda_min
+ls_ridge_min_coefs <- ridge_fit$beta[, ridge_lambda_min_index] |>
+  enframe(name = "variable", value = "coefficient") |>
+  mutate(algorithm = "Ridge with min")
+# ridge lambda_1se
+ls_ridge_1se_coefs <- ridge_fit$beta[, ridge_lambda_1se_index] |>
+  enframe(name = "variable", value = "coefficient") |>
+  mutate(algorithm = "Ridge with 1SE")
+
+# compute the order of the coefficients in terms of absolute value magnitude
+order <- rank(abs(ls_coefs$coefficient))
+# combine the coefficient tables together
+coefs_ls <- mutate(ls_coefs, order = order)
+coefs_reg <- mutate(ls_lasso_min_coefs, order = order) |>
+  add_row(mutate(ls_lasso_1se_coefs, order = order)) |>
+  add_row(mutate(ls_ridge_min_coefs, order = order)) |>
+  add_row(mutate(ls_ridge_1se_coefs, order = order))
+```
+
+Then can create a plot that compares the unregularized and regularized coefficients for each regularized fit.
+
+Figure @fig-reg-coefs shows that the lasso fit with $\lambda_{min}$ implemented almost no shrinkage (implying that this regularization parameter was not large enough to actually perform any meaningful regularization). The ridge fit with $\lambda_{min}$ involves slightly more regularization than the corresponding lasso fit with $\lambda_{min}$, but most of the coeﬀicients are still very similar to their unregularized counterparts. On the other hand, the Lasso fit with $\lambda_{1SE}$ shrank 19 of the 47 coeﬀicients completely to zero (each coeﬀicient that is exactly equal to zero is represented with an $\times$ rather than a point). Note, however, that many of the coeﬀicients of the ridge-regularized fit with $\lambda_{1SE}$ have been shrunk towards zero, but none of the ridge-regularized coefficients are exactly equal to zero.
+
+```{r}
+#| label: fig-reg-coefs
+#| fig-cap: "Line plots displaying the original and regularized coeﬀicient values for each type of regularization: (a) ridge with the hyperparameter value that attains the smallest CV error, (b) ridge with the largest hyperparameter value that is within 1 SE of the smallest CV error, (c) lasso with the hyperparameter value that attains the smallest CV error, and (d) lasso with the largest hyperparameter value that is within 1 SE of the smallest CV error."
+#| fig-height: 9
+coefs_reg |>
+  # make sure the variables appear in the correct order
+  arrange(desc(order)) |>
+  mutate(variable = fct_inorder(variable)) |>
+  arrange(algorithm) |>
+  mutate(algorithm = fct_inorder(algorithm)) |>
+  # create an indicator for whether each coefficient equals zero
+  mutate(zero = coefficient == 0) |>
+  ggplot() +
+  geom_hline(yintercept = 0, col = "grey60") +
+  geom_line(aes(x = variable, y = abs(coefficient), group = algorithm)) +
+  # add the unregularized coefficient line
+  geom_line(aes(x = variable, y = abs(coefficient), group = 1),
+            data = coefs_ls, linetype = "dotted", alpha = 0.5) +
+  # add points
+  geom_point(aes(x = variable, y = abs(coefficient), shape = zero), 
+             color = "grey30", size = 2) +
+  # add points for unregularized line
+  geom_point(aes(x = variable, y = abs(coefficient)),
+             data = coefs_ls, alpha = 0.3, size = 2) +
+  scale_y_continuous("(Standardized absolute value) coefficient", 
+                     limits = c(0, 34000)) +
+  scale_x_discrete(NULL) +
+  scale_alpha_manual("Fit:", values = c(0.3, 1)) +
+  scale_shape_manual("Value:", values = c(16, 4), labels = c("non-zero", "zero")) +
+  scale_linetype_manual("Fit:", values = c("dotted", "solid")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        axis.line.x = element_blank(),
+        legend.position = "top",
+        strip.background = element_blank(),
+        strip.text = element_text(hjust = 0)) +
+  facet_wrap(~algorithm, nrow = 4)
+```
+
+
+
+## PCS evaluations
+
+### Predictability
+
+Let's compare the performance of each fit on the validation set houses. 
+
+To recap which model is which, we will re-fit them. Since we want to include the neighborhood variable in the multi-predictor fit, so that we don't have to manually write the names of all of the neighborhood dummy variables, we will create a version of the pre-processed datasets with the neighborhood categorical variable. Note that we have to do some finagling to make sure that the validation set neighborhood levels match those of the training set.
+
+```{r}
+# let's create a version of the pre-processed training data with the 
+# (non-dummy) categorical neighborhood variable
+ames_train_preprocessed_nbhd <- preProcessAmesData(ames_train_clean, 
+                                                   neighborhood_dummy = FALSE)
+# identify which neighborhoods are included in the training data
+train_neighborhoods <- ames_train_preprocessed_nbhd |> 
+  pull(neighborhood) |>
+  unique()
+# create preprocessed validation set with the non-dummy neighborhood var
+ames_val_preprocessed_nbhd <- 
+  preProcessAmesData(ames_val_clean,
+                     neighborhood_dummy = FALSE,
+                     column_selection = colnames(ames_train_preprocessed_nbhd),
+                     neighborhood_levels = train_neighborhoods)
+```
+
+We also need to create a matrix version of the validation set for fitting ridge and lasso. However, note that we will use the mean and SD from the training set to standardize the validation set (the logic here is that if we were using these algorithm to predict the response of a new data point, we would use the training data mean and SD to standardize it).
+
+```{r}
+# standardize the validation set using the mean and SD from the training data
+ames_val_preprocessed_std <- map2_df(select(ames_val_preprocessed, -pid, -sale_price),
+                                     select(ames_train_preprocessed, -sale_price),
+                                     function(.x_val, .x_train) {
+                                       (.x_val - mean(.x_train)) / sd(.x_train)
+                                     }) 
+x_val <- as.matrix(ames_val_preprocessed_std)
+```
+
+Finally we are ready to re-fit our multi-predictor algorithm to include the neighborhood feature:
+
+```{r}
+ls_area <- lm(sale_price ~ gr_liv_area, ames_train_preprocessed)
+ls_multi <- lm(sale_price ~ gr_liv_area + overall_qual + bedroom_abv_gr + 
+                 year_built + neighborhood, ames_train_preprocessed_nbhd)
+```
+And we can compute predictions for each fit
+
+```{r}
+val_performance <- 
+  tibble(pid = ames_val_preprocessed$pid,
+         true = ames_val_preprocessed$sale_price,
+         pred_ls_area = predict(ls_area, ames_val_preprocessed),
+         pred_ls_multi = predict(ls_multi, ames_val_preprocessed_nbhd),
+         pred_ls_all = predict(ls_all, ames_val_preprocessed),
+         pred_ridge = predict(ridge_fit, x_val)[, ridge_lambda_1se_index],
+         pred_lasso = predict(lasso_fit, x_val)[, lasso_lambda_1se_index])
+```
+
+And we can evaluate the performance of each fit, and format the results in the table below:
+
+```{r}
+val_performance |>
+  pivot_longer(c("pred_ls_area", "pred_ls_multi", "pred_ls_all", "pred_ridge", "pred_lasso"),
+               names_to = "fit", values_to = "pred") |>
+  group_by(fit) |>
+  summarise(rmse = rmse_vec(true, pred),
+            mae = mae_vec(true, pred),
+            cor = cor(true, pred)) |>
+  arrange(cor)
+```
+
+Note that the three fits with all of the predictors (`ls_all`, `ridge_fit`, and `lasso_fit`) all have fairly similar (and fairly good, in terms of correlation) predictive performance. 
+
+### Stability
+
+
+#### Stability to data perturbations
+
+
+To assess the stability of our data to appropriate perturbations in the data, we first need to decide what makes an "appropriate" perturbation. That is, what type of data perturbation (e.g., adding random noise, or performing sampling) most resembles the way that the data *could* have been measured or collected differently, as well as how these results will be applied in the future. 
+
+
+While the Ames housing data does not correspond to a random sample from a greater population of houses, each house is more-or-less exchangeable, meaning that a random sampling technique would be a reasonable perturbation, so we will draw 100 bootstrap samples of the original data. 
+
+Moreover, it is plausible that the living area measurements involve a slight amount of measurement error, although we do not have a realistic sense of how much. To really stress-test our results, we choose to add another perturbation to the data that involves adding some random noise to 30% of the `gr_liv_area` measurements. Since the standard deviation of the living area is approximately 500, we decide to add or subtract a random number between 0 and 250 (i.e. add noise up to half a standard deviation) to 30% of `gr_liv_area` observations.
+
+Since we will be repeating this analysis many times, we will write a function that will take an Ames dataset, and return a perturbed version of it.
+
+```{r}
+perturbAmes <- function(.ames_data, 
+                        .perturb_gr_liv_area = FALSE) {
+  perturbed_ames <- .ames_data |>
+    # create a binary variable that indicates which 30% of the area values to perturb
+    mutate(perturb_area = rbernoulli(n(), p = 0.3) * .perturb_gr_liv_area) |>
+    # conduct a bootstrap sample
+    sample_frac(1, replace = TRUE) |>
+    rowwise() |>
+    # perturb the gr_liv_area variable
+    mutate(gr_liv_area = if_else(perturb_area == 1 & .perturb_gr_liv_area, 
+                                 # add some number between -250 and 250
+                                 gr_liv_area + as.integer(round(runif(1, -250, 250))), 
+                                 # or else, do not perturb the living area
+                                 gr_liv_area)) |>
+    # undo rowwise()
+    ungroup() |>
+    # remove unnecessary binary variable
+    select(-perturb_area)
+  return(perturbed_ames)
+}
+```
+
+
+Below we create a tibble with a list column containing the 100 perturbed versions of the training data. 
+
+```{r}
+set.seed(467824)
+ames_data_perturbed <- tibble(iter = 1:100) |>
+  rowwise() |>
+  mutate(data_train_perturbed = list(perturbAmes(ames_train_preprocessed, 
+                                                 .perturb_gr_liv_area = TRUE)),
+         # add a version with the neighborhood variable for the 5-predictor fit
+         data_train_perturbed_nbhd = list(perturbAmes(ames_train_preprocessed_nbhd, 
+                                                      .perturb_gr_liv_area = TRUE))) |>
+  ungroup()
+ames_data_perturbed
+```
+
+Then we can define a tibble that has a list column containing each relevant LS fits in it:
+
+```{r}
+perturbed_data_ls <- ames_data_perturbed |>
+  rowwise() |>
+  mutate(ls_area = list(lm(sale_price ~ gr_liv_area, data_train_perturbed)),
+         ls_multi = list(lm(sale_price ~ gr_liv_area + overall_qual + 
+                              year_built + bedroom_abv_gr + neighborhood, 
+                            data_train_perturbed_nbhd)),
+         ls_all = list(lm(sale_price ~ ., data_train_perturbed))) |>
+  ungroup()
+perturbed_data_ls
+```
+
+Since generating a ridge or lasso fit involves multiple lines of code, we will write a function for fitting a ridge and lasso model and generating predictions from it.
+
+```{r}
+predRegularizedLs <- function(.data_train, 
+                              .data_val,
+                              .alpha) {
+  
+  
+  x_train <- .data_train |>
+    dplyr::select(-sale_price) 
+  # compute the validation set
+  x_val <- .data_val |>
+    dplyr::select(-sale_price, -pid)
+  # standardize the validation data using the mean and sd of the training data
+  x_val <- map2_df(x_val, x_train, function(.x_val, .x_train) {
+    (.x_val - mean(.x_train)) / sd(.x_train)
+  }) |>
+    as.matrix()
+  
+  # standardize the training data
+  x_train <- x_train |>
+    mutate_all(~(. - mean(.)) / sd(.)) |>
+    as.matrix()
+  y_train <- .data_train |>
+    pull(sale_price)
+  
+  # CV hyperparameter selection
+  reg_cv <- cv.glmnet(x = x_train, y = y_train, 
+                      type.measure = "mse", nfolds = 10,
+                      alpha = .alpha)
+  # compute the fit
+  reg_fit <- glmnet(x = x_train, y = y_train, 
+                    lambda = reg_cv$lambda, 
+                    alpha = .alpha)
+  
+  # identify the fit that corresponds to lambda_1se
+  reg_lambda_1se_index <- which(reg_fit$lambda == reg_cv$lambda.1se)
+  # generate. prediction for the validation set using the selected fit
+  pred_1se = predict(reg_fit, x_val)[, reg_lambda_1se_index]
+  
+  return(pred_1se)
+}
+
+```
+
+
+We can then generate sale price predictions for each house in the validation set using each perturbed LS fits.
+
+```{r}
+perturbed_data_pred <- perturbed_data_ls |>
+  rowwise() |>
+  transmute(iter, 
+            true_val = list(ames_val_preprocessed$sale_price),
+            pred_val_ls_area = list(predict(ls_area, ames_val_preprocessed)),
+            pred_val_ls_multi = list(predict(ls_multi, ames_val_preprocessed_nbhd)),
+            pred_val_ls_all = list(predict(ls_all, ames_val_preprocessed)),
+            pred_val_ridge = list(predRegularizedLs(data_train_perturbed, 
+                                                    ames_val_preprocessed, 
+                                                    .alpha = 0)),
+            pred_val_lasso = list(predRegularizedLs(data_train_perturbed, 
+                                                    ames_val_preprocessed, 
+                                                    .alpha = 1))) |>
+  ungroup() |>
+  # add pid
+  mutate(pid = list(ames_val_preprocessed$pid)) |>
+  # unnest the tibble
+  unnest(c(true_val, pid, pred_val_ls_area, pred_val_ls_multi, 
+           pred_val_ls_all, pred_val_ridge, pred_val_lasso))
+perturbed_data_pred
+```
+
+
+
+Let's define a prediction stability plot function:
+
+
+```{r}
+# compute the interval (max and min prediction) for each validation house
+predStabilityPlot <- function(.perturbed_pred_df,
+                              .true_var,
+                              .pred_var,
+                              .title = NULL) {
+  
+  perturbed_pred_interval <- .perturbed_pred_df |> 
+    pivot_longer({{ .pred_var }}, 
+                 names_to = "fit", values_to = "pred") |>
+    group_by(pid, fit) |>
+    # compute the range (interval) of predictions for each response
+    summarise(true = unique({{ .true_var }}),
+              min_pred = min(pred),
+              max_pred = max(pred)) |>
+    ungroup() 
+  
+  perturbed_pred_interval |>
+    # plot the intervals
+    ggplot() +
+    geom_abline(intercept = 0, slope = 1, alpha = 0.5) +
+    geom_segment(aes(y = true, yend = true, x = min_pred, xend = max_pred),
+                 alpha = 0.5) +
+    scale_y_continuous(name = "Observed sale response", labels = label_dollar()) +
+    scale_x_continuous(name = "Predicted sale response range", labels = label_dollar())  +
+    ggtitle(.title)
+}
+
+```
+
+And use it to visualize the range of perturbed predictions for 150 validation set houses for each fit. 
+
+
+```{r}
+#| label: fig-stab-data
+#| fig-cap: "Prediction stability plots showing the range of predictions for 150 randomly selected validation set data point across the 100 different LS fits with (a) one predictive feature (area), (b) five predictive features, and (c) all available predictive features, each trained on a different perturbed version of the training dataset."
+#| warning: false
+#| message: false
+set.seed(8674)
+val_sample_pid <- sample(ames_val_preprocessed$pid, 150)
+
+
+gg_stability_data_ls_area <- perturbed_data_pred |>
+  filter(pid %in% val_sample_pid) |>
+  predStabilityPlot(.true_var = true_val, .pred_var = pred_val_ls_area,
+                    .title = "LS (area)")
+
+gg_stability_data_ls_multi <- perturbed_data_pred |>
+  filter(pid %in% val_sample_pid) |>
+  predStabilityPlot(.true_var = true_val, .pred_var = pred_val_ls_multi,
+                    .title = "LS (5-predictor)")
+
+gg_stability_data_ls_all <- perturbed_data_pred |>
+  filter(pid %in% val_sample_pid) |>
+  predStabilityPlot(.true_var = true_val, .pred_var = pred_val_ls_all,
+                    .title = "LS (all)")
+
+gg_stability_data_ridge <- perturbed_data_pred |>
+  filter(pid %in% val_sample_pid) |>
+  predStabilityPlot(.true_var = true_val, .pred_var = pred_val_ridge,
+                    .title = "Ridge")
+
+gg_stability_data_lasso <- perturbed_data_pred |>
+  filter(pid %in% val_sample_pid) |>
+  predStabilityPlot(.true_var = true_val, .pred_var = pred_val_lasso,
+                    .title = "Lasso")
+
+
+gg_stability_data_ls_area + gg_stability_data_ls_multi + 
+  gg_stability_data_ls_all + gg_stability_data_ridge +
+  gg_stability_data_lasso + plot_spacer() +
+  plot_layout(ncol = 2)
+```
+
+
+
+It is clear that the range of predictions gets wider for the most complex fits with more predictive features (even though they are more accurate overall), but it looks like regularization helps increase the stability of these predictions slightly. 
+
+
+Let's quantify the average sd of the predictions for each of the fits
+
+```{r}
+perturbed_data_pred |>
+  # for each house
+  group_by(pid) |>
+  # compute the SD for each pid for each model
+  summarise(sd_area = sd(pred_val_ls_area),
+            sd_multi = sd(pred_val_ls_multi),
+            sd_all = sd(pred_val_ls_all),
+            sd_ridge = sd(pred_val_ridge),
+            sd_lasso = sd(pred_val_lasso)) |>
+  ungroup() |>
+  # compute the average SD for each model across all pids
+  summarise(mean_sd_area = mean(sd_area),
+            mean_sd_multi = mean(sd_multi),
+            mean_sd_all = mean(sd_all),
+            mean_sd_ridge = mean(sd_ridge),
+            mean_sd_lasso = mean(sd_lasso))
+
+
+```
+
+
+
+Lastly, we will look at the stability of the coefficients themselves. First let's write a function for extracting the *coefficients* from the ridge and lasso fits:
+
+```{r}
+
+coefsRegularizedLs <- function(.data_train, 
+                               .alpha) {
+  
+  # standardize the training data
+  x_train <- .data_train |>
+    dplyr::select(-sale_price) |>
+    mutate_all(~(. - mean(.)) / sd(.)) |>
+    as.matrix()
+  y_train <- .data_train |>
+    pull(sale_price)
+  
+  # CV hyperparameter selection
+  # compute cv.glment
+  reg_cv <- cv.glmnet(x = x_train, y = y_train, 
+                      type.measure="mse", nfolds = 10,
+                      alpha = .alpha)
+  # compute the fit
+  reg_fit <- glmnet(x = x_train, y = y_train, 
+                    lambda = reg_cv$lambda, 
+                    alpha = .alpha)
+  
+  coefs <- reg_fit$beta[, which(reg_cv$lambda == reg_cv$lambda.1se)]
+  
+  return(enframe(coefs, 
+                 name = "variable",
+                 value = "coefficient"))
+}
+```
+
+Then we will aggregate the coefficients for each fit together. However, to ensure that the ridge/lasso coefficients are comparable with the unregularized coefficients, we will re-fit each of the unregularized fits using the standardized data.
+
+```{r}
+standardize <- function(x) {
+  (x - mean(x)) / sd(x)
+}
+
+perturbed_data_coefs <- ames_data_perturbed |>
+  rowwise() |>
+  # create a standardized version of each of the perturbed datasets
+  mutate(data_train_perturbed_std = list( 
+    mutate(data_train_perturbed, 
+           across(where(is.numeric), standardize)))) |>
+  # create a standardized version of each of the perturbed datasets (with 
+  #   categorical neighborhood variable)
+  mutate(data_train_perturbed_nbhd_std = list( 
+    mutate(data_train_perturbed_nbhd, 
+           across(where(is.numeric), standardize)))) |>
+  # compute the LS fits
+  mutate(ls_all = list(lm(sale_price ~ ., 
+                          data_train_perturbed_std)),
+         ls_multi = list(lm(sale_price ~ gr_liv_area + overall_qual + 
+                              year_built + bedroom_abv_gr + neighborhood, 
+                            data_train_perturbed_nbhd_std)),
+         ls_area = list(lm(sale_price ~ gr_liv_area, 
+                           data_train_perturbed_std))) |>
+  # extract the coefficients from each LS fit and the ridge and lasso fits
+  mutate(coefs_ls_area = list(enframe(ls_area$coefficients,
+                                      name = "variable",
+                                      value = "coefficient")),
+         coefs_ls_multi = list(enframe(ls_multi$coefficients,
+                                       name = "variable",
+                                       value = "coefficient")),
+         coefs_ls_all = list(enframe(ls_all$coefficients,
+                                     name = "variable",
+                                     value = "coefficient")),
+         coefs_ridge = list(coefsRegularizedLs(data_train_perturbed_std,
+                                               .alpha = 0)),
+         coefs_lasso = list(coefsRegularizedLs(data_train_perturbed_std,
+                                               .alpha = 1))) |>
+  # select just the coefficient columns
+  select(coefs_ls_area, coefs_ls_multi, coefs_ls_all, coefs_ridge,
+         coefs_lasso) |>
+  # convert to longer form
+  pivot_longer(everything(), names_to = "fit", values_to = "coefs", 
+               names_prefix = "coefs_") |>
+  # unnest the list columns
+  unnest(coefs) 
+# look at the object we created
+perturbed_data_coefs
+```
+
+Then we can visualize the top 20 coefficients (based on the LS (all predictors) fit)
+
+```{r}
+# identify the 20 variables with the largest coefficients
+top_20_coefs_ls_all <- perturbed_data_coefs |>
+  # filter to LS (all predictors) coefficients
+  filter(fit == "ls_all") |>
+  # for each variable
+  group_by(variable) |>
+  # compute the average perturbed coefficient value
+  summarise(mean_coef = mean(coefficient)) |>
+  # remove the intercept
+  filter(variable != "(Intercept)") |>
+  # arrange coefs in descending order
+  arrange(desc(mean_coef)) |>
+  # take the top 20
+  head(20) |>
+  # extract the variable names
+  distinct(variable) |>
+  pull(variable)
+```
+
+Then we can create a series of boxplots showing the distribution of each perturbed coefficient for each fit
+
+```{r}
+#| label: fig-perturb-data-coef-dist
+#| fig-cap: "Boxplots showing the distribution of the 20 largest (in absolute value) LS coefficients across the fits fit to 100 perturbed versions of the training data. The variables were each standardized to a common scale prior to fitting the algorithms (so that the coefficient values are comparable)."
+#| fig-height: 10
+
+
+# create a plot
+perturbed_data_coefs |>
+  filter(variable %in% top_20_coefs_ls_all) |>
+  # make sure the fits appear in the correct order
+  mutate(fit = fct_inorder(fit)) |>
+  # force the variables to appear in descending order
+  group_by(variable) |>
+  mutate(mean_coef = abs(mean(coefficient))) |>
+  ungroup() |>
+  arrange(desc(mean_coef)) |>
+  mutate(variable = fct_inorder(variable)) |>
+  # create boxplots for the distribution of each coefficient
+  ggplot() +
+  geom_boxplot(aes(x = variable, y = coefficient)) +
+  facet_wrap(~fit, ncol = 1) +
+  theme_bw() +
+  scale_x_discrete(NULL) +
+  theme(axis.text.x = element_text(angle = 90, 
+                                   hjust = 1, 
+                                   vjust = 0.5)) 
+```
+
+
+
+
+#### Stability to cleaning/pre-processing judgment call perturbations
+
+
+Next, we need to repeat this stability analysis, but instead of using data perturbations based on sampling and adding random noise, we will investigate perturbations to our cleaning and pre-processing judgment calls. 
+
+First, we need to identify all of the judgment calls that we plan to perturb. The judgment calls (and the options) that we will consider are:
+
+
+- `max_identical_thresh`: Missing value threshold of 0.65, 0.8, or 0.95 (i.e., we remove variables whose proportion of missing values exceeds this value).
+
+- `n_neighborhoods`: Keeping the 10 or 20 largest neighborhoods (and aggregate the rest before computing neighborhood dummy variables).
+
+- `impute_missing_categorical`: Impute missing categorical values with either an "other" value or the mode.
+
+- `simplify_vars`: Simplify several variables (such as bathrooms, porch, etc) or not.
+
+- `transform_response`: Apply a log or square-root transformation to the response, or leave it untransformed.
+
+- `cor_feature_selection_threshold`: Apply correlation feature selection with a threshold of 0.5, or not applying correlation feature selection (threshold of 0).
+
+- `convert_categorical`: Convert categorical variables directly to a numeric variable or create (simplified) dummy variables.
+
+
+Using `expand_grid()`, we can create a data frame where each row corresponds to a unique combination of these judgment call options:
+
+
+```{r}
+# create the judgment call perturbation combinations
+param_options <- expand_grid(max_identical_thresh = c(0.65, 0.8, 0.95),
+                             n_neighborhoods = c(10, 20),
+                             impute_missing_categorical = c("other", "mode"),
+                             simplify_vars = c(TRUE, FALSE),
+                             transform_response = c("none", "log", "sqrt"),
+                             cor_feature_selection_threshold = c(0, 0.5),
+                             convert_categorical = c("numeric", "simplified_dummy", "dummy"))
+
+param_options |> print(width = Inf)
+```
+
+
+Then we need to create a cleaned/pre-processed version of the training and validation datasets for each combination of these judgment calls by adding list columns to the `param_options` tibble:
+
+```{r}
+# create the perturbed datasets in a list column
+ames_jc_perturbed <- param_options |> 
+  rowwise() |>
+  # add training data list column
+  mutate(data_train_perturbed = 
+           list(preProcessAmesData(ames_train_clean,
+                                   max_identical_thresh = max_identical_thresh,
+                                   n_neighborhoods = n_neighborhoods,
+                                   impute_missing_categorical = impute_missing_categorical,
+                                   simplify_vars = simplify_vars,
+                                   transform_response = transform_response,
+                                   cor_feature_selection_threshold = cor_feature_selection_threshold,
+                                   convert_categorical = convert_categorical))) |>
+  # add validation data list column
+  mutate(data_val_perturbed = 
+           list(preProcessAmesData(ames_val_clean,
+                                   max_identical_thresh = max_identical_thresh,
+                                   n_neighborhoods = n_neighborhoods,
+                                   # make sure the validation neighborhoods match the training neighborhoods
+                                   neighborhood_levels = map_chr(str_split(colnames(select(data_train_perturbed, contains("neighborhood"))), "neighborhood_"), ~.[2]),
+                                   impute_missing_categorical = impute_missing_categorical,
+                                   simplify_vars = simplify_vars,
+                                   transform_response = transform_response,
+                                   cor_feature_selection_threshold = cor_feature_selection_threshold,
+                                   convert_categorical = convert_categorical,
+                                   # make sure validation set cols match the training set cols
+                                   column_selection = colnames(data_train_perturbed), 
+                                   keep_pid = TRUE)))
+
+# look at the object we just created
+ames_jc_perturbed |> print(width = Inf)
+```
+
+
+
+
+
+
+Then we can essentially repeat the code from above, but for these judgment call-perturbed datasets. However, since the judgment calls primarily don't affect the single-predictor and 5-predictor fits, we will just focus on the LS (all predictor) fit and the lasso and ridge regularized fits.
+
+
+```{r}
+perturbed_jc_pred <- ames_jc_perturbed |>
+  rowwise() |>
+  # generate the LS (all) fit
+  mutate(ls_all = list(lm(sale_price ~ ., data_train_perturbed))) |>
+  mutate(pid = list(data_val_perturbed$pid),
+         true_val = list(data_val_perturbed$sale_price),
+         pred_val_ls_all = list(predict(ls_all, data_val_perturbed)),
+         pred_val_ridge = list(predRegularizedLs(data_train_perturbed, 
+                                                 data_val_perturbed, 
+                                                 .alpha = 0)),
+         pred_val_lasso = list(predRegularizedLs(data_train_perturbed, 
+                                                 data_val_perturbed, 
+                                                 .alpha = 1))) |>
+  # if the perturbation involved a response transformation, we need to undo
+  # the transformation for the predictions so that they are comparable with 
+  # the untransformed versions
+  mutate(pred_val_ls_all = 
+           case_when(transform_response == "log" ~ list(exp(pred_val_ls_all)),
+                     transform_response == "sqrt" ~ list(pred_val_ls_all^2),
+                     transform_response == "none" ~ list(pred_val_ls_all))) |>
+  mutate(pred_val_ridge = 
+           case_when(transform_response == "log" ~ list(exp(pred_val_ridge)),
+                     transform_response == "sqrt" ~ list(pred_val_ridge^2),
+                     transform_response == "none" ~ list(pred_val_ridge))) |>
+  mutate(pred_val_lasso = 
+           case_when(transform_response == "log" ~ list(exp(pred_val_lasso)),
+                     transform_response == "sqrt" ~ list(pred_val_lasso^2),
+                     transform_response == "none" ~ list(pred_val_lasso))) |>
+  mutate(true_val = 
+           case_when(transform_response == "log" ~ list(exp(true_val)),
+                     transform_response == "sqrt" ~ list(true_val^2),
+                     transform_response == "none" ~ list(true_val))) |>
+  # remove columns we won't need anymore
+  select(-ls_all, -data_train_perturbed, -data_val_perturbed) |>
+  ungroup() |>
+  # unnest the tibble
+  unnest(c(pid, true_val,
+           pred_val_ls_all, pred_val_ridge, pred_val_lasso))
+
+# look at the object we've created
+perturbed_jc_pred |> print(width = Inf)
+```
+
+
+
+
+We next want to use it to visualize the range of perturbed predictions for 150 validation set houses for each fit. However, first, we should filter any particularly poorly performing fits. To identify whether there are any particularly poorly performing fits, let's compute the correlation predictive performance for each fit to each perturbed dataset and visualize their distributions across the different fits and judgment calls.
+
+```{r}
+perturbed_jc_correlations <- perturbed_jc_pred |>
+  # convert the data to long-form (create a single column for all predictions and 
+  # a fit/model identifier)
+  pivot_longer(cols = c("pred_val_ls_all", "pred_val_ridge", "pred_val_lasso"), 
+                names_to = "fit", values_to = "pred_val", 
+               names_prefix = "pred_val_") |>
+  group_by(fit, max_identical_thresh, n_neighborhoods, 
+                      simplify_vars, convert_categorical, transform_response,
+                       cor_feature_selection_threshold) |>
+  # compute the correlation performance for each fit
+  summarise(correlation = cor(true_val, pred_val)) 
+# look at the object
+perturbed_jc_correlations |> print(width = Inf)
+```
+
+Let's visualize these correlations against each of the judgment call options for each fit:
+
+```{r}
+#| label: fig-correlation-jc
+#| fig-cap: "Boxplots demonstrating the distributions of the LS, lasso, and ridge validation set correlation performance, where each algorithm is fit using various combinations of the following six pre-processing judgment calls: (a) converting ordered categorical variables to dummy variables, numeric variables, or a simplified version of the dummy variables, (b) the choice of missing value threshold above which to remove features, (c) the choice of how many neighborhoods to aggregate, (d) whether to simplify several variables, (e) whether to apply a log or square-root transformation to the response, and (f) whether to apply a correlation-based feature selection (a threshold of 0 corresponds to no feature selection)."
+#| message: false
+#| warning: false
+
+
+perturbed_jc_correlations |>
+  ungroup() |>
+  # convert all judgment call options to character variables
+  mutate(across(one_of("max_identical_thresh", "n_neighborhoods", 
+                       "simplify_vars", "convert_categorical", 
+                       "transform_response",
+                       "cor_feature_selection_threshold"), as.character)) |>
+  # create a long-form data frame with a single column for the judgment calls
+  pivot_longer(cols = c("max_identical_thresh", "n_neighborhoods", 
+                        "simplify_vars", "convert_categorical", 
+                        "transform_response", 
+                        "cor_feature_selection_threshold"), 
+               names_to = "judgment_call", values_to = "option") |>
+  # plot the correlations against the judgment call options for each fit
+  ggplot() +
+  theme_bw() +
+  geom_boxplot(aes(x = option, y = correlation, fill = fit)) +
+  facet_wrap(~judgment_call, scales = "free_x", ncol = 2) +
+  theme(legend.position = "top",
+        panel.grid.major.x = element_line(color = "grey90"), 
+        strip.background = element_rect(fill = "white"))
+```
+
+
+The main takeaway is that transforming the response dramatically improves the predictive performance, and applying correlation feature selection dramatically diminishes it. Based on this figure, **let's use a predictability screening test that requires each fit has at least a validation set correlation performance of 0.93**. 
+
+
+
+```{r}
+#| label: fig-stab-jc
+#| fig-cap: "Prediction stability plots showing the range of predictions for 150 randomly selected validation set data point across the 100 different LS fits with (a) one predictive feature (area), (b) five predictive features, and (c) all available predictive features, each trained on a different cleaning/pre-processing judgment call-perturbed version of the training dataset."
+#| warning: false
+#| message: false
+
+
+gg_stability_jc_ls_all <- perturbed_jc_pred |>
+  # conduct predictability screening
+  left_join(filter(perturbed_jc_correlations, fit == "ls_all")) |>
+  select(-fit) |>
+  filter(correlation > 0.93) |>
+  # filter to the 150 validation set houses
+  filter(pid %in% val_sample_pid) |>
+  # create the prediction stability plot
+  predStabilityPlot(.true_var = true_val, 
+                    .pred_var = pred_val_ls_all,
+                    .title = "LS (all predictors)")
+
+gg_stability_jc_ridge <- perturbed_jc_pred |>
+  # conduct predictability screening
+  left_join(filter(perturbed_jc_correlations, fit == "ridge")) |>
+  select(-fit) |>
+  filter(correlation > 0.93) |>
+  # filter to the 150 validation set houses
+  filter(pid %in% val_sample_pid) |>
+  # create the prediction stability plot
+  predStabilityPlot(.true_var = true_val, 
+                    .pred_var = pred_val_ridge, 
+                    .title = "Ridge")
+
+gg_stability_jc_lasso <- perturbed_jc_pred |>
+  # conduct predictability screening
+  left_join(filter(perturbed_jc_correlations, fit == "lasso")) |>
+  select(-fit) |>
+  filter(correlation > 0.93) |>
+  # filter to the 150 validation set houses
+  filter(pid %in% val_sample_pid) |>
+  # create the prediction stability plot
+  predStabilityPlot(.true_var = true_val, 
+                    .pred_var = pred_val_lasso,
+                    .title = "Lasso")
+
+gg_stability_jc_ls_all + gg_stability_jc_ridge +
+  gg_stability_jc_lasso + plot_spacer() +
+  plot_layout(ncol = 2)
+```
+
+
+
+The three plots look fairly similar, but we can compute the average observation-specific SD of the predictions for each fit (that passed the predictability screening) to compare.
+
+```{r}
+perturbed_jc_pred |>
+  pivot_longer(c("pred_val_ls_all", "pred_val_ridge", "pred_val_lasso"),
+               names_to = "fit", values_to = "pred_val", 
+               names_prefix = "pred_val_") |>
+  # conduct predictability screening
+  left_join(perturbed_jc_correlations) |>
+  filter(correlation > 0.93) |>
+  # for each house
+  group_by(pid, fit) |>
+  # compute the sd of each set of perturbed predictions for each house
+  summarise(sd = sd(pred_val)) |>
+  ungroup() |>
+  group_by(fit) |>
+  summarise(mean_sd = mean(sd))
+```
+
+
+From the table above, it again seems that the regularization helps improve the stability of the predictions to judgment call perturbations, since the average observation-specific SD of the predictions are smaller for the `lasso` and `ridge` fits than for the unregularized (`ls_all`) fit.
+
+Lastly, we will again look at the stability of the coefficients themselves.
+
+Again, to ensure that the ridge/lasso coefficients are comparable with the unregularized coefficients, we will re-fit each of the unregularized fits using the standardized data.
+
+```{r}
+
+perturbed_jc_coefs <- ames_jc_perturbed |>
+  rowwise() |>
+  # create a standardized version of each of the perturbed datasets
+  mutate(data_train_perturbed_std = list( 
+    mutate(data_train_perturbed, 
+           across(where(is.numeric), standardize)))) |>
+  # compute the LS fits
+  mutate(ls_all = list(lm(sale_price ~ ., 
+                          data_train_perturbed_std))) |>
+  # extract the coefficients from each LS fit and the ridge and lasso fits
+  mutate(coefs_ls_all = list(enframe(ls_all$coefficients,
+                                     name = "variable",
+                                     value = "coefficient")),
+         coefs_ridge = list(coefsRegularizedLs(data_train_perturbed_std,
+                                               .alpha = 0)),
+         coefs_lasso = list(coefsRegularizedLs(data_train_perturbed_std,
+                                               .alpha = 1))) |>
+  # select just the coefficient columns
+  select(coefs_ls_all, coefs_ridge, coefs_lasso) |>
+  # convert to longer form
+  pivot_longer(everything(), names_to = "fit", values_to = "coefs", 
+               names_prefix = "coefs_") |>
+  # unnest the list columns
+  unnest(coefs) 
+# look at the object we created
+perturbed_jc_coefs
+```
+
+Then we can visualize the top 20 coefficients (based on the LS (all predictors) fit)
+
+```{r}
+# identify the 20 variables with the largest coefficients
+top_20_coefs_ls_all_jc <- perturbed_jc_coefs |>
+  # filter to LS (all predictors) coefficients
+  filter(fit == "ls_all") |>
+  # for each variable
+  group_by(variable) |>
+  # compute the average perturbed coefficient value
+  summarise(mean_coef = mean(coefficient)) |>
+  # remove the intercept
+  filter(variable != "(Intercept)") |>
+  # arrange coefs in descending order
+  arrange(desc(mean_coef)) |>
+  # take the top 20
+  head(20) |>
+  # extract the variable names
+  distinct(variable) |>
+  pull(variable)
+```
+
+Then we can create a series of boxplots showing the distribution of each perturbed coefficient for each fit
+
+```{r}
+#| label: fig-perturb-jc-coef-dist
+#| fig-cap: "Boxplots showing the distribution of the 20 largest (in absolute value) LS coefficients across the fits fit to 100 perturbed versions of the training data. The variables were each standardized to a common scale prior to fitting the algorithms (so that the coefficient values are comparable)."
+#| fig-height: 10
+
+
+# create a plot
+perturbed_jc_coefs |>
+  filter(variable %in% top_20_coefs_ls_all_jc) |>
+  # make sure the fits appear in the correct order
+  mutate(fit = fct_inorder(fit)) |>
+  # force the variables to appear in descending order
+  group_by(variable) |>
+  mutate(mean_coef = abs(mean(coefficient))) |>
+  ungroup() |>
+  arrange(desc(mean_coef)) |>
+  mutate(variable = fct_inorder(variable)) |>
+  # create boxplots for the distribution of each coefficient
+  ggplot() +
+  geom_boxplot(aes(x = variable, y = coefficient)) +
+  facet_wrap(~fit, ncol = 1) +
+  theme_bw() +
+  scale_x_discrete(NULL) +
+  theme(axis.text.x = element_text(angle = 90, 
+                                   hjust = 1, 
+                                   vjust = 0.5)) 
+```
+
+
+
+

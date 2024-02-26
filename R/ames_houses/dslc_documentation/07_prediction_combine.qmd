@@ -1,0 +1,753 @@
+---
+title: "[Chapter 13] The final Ames sale price predictions"
+subtitle: "[DSLC stages]: Analysis"
+format: 
+  html:
+    css: theme.css
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+
+The following code sets up the libraries and creates cleaned and pre-processed training, validation and test data that we will use in this document.
+
+```{r}
+#| message: false
+#| warning: false
+
+# loading libraries
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(yardstick)
+library(scales)
+library(patchwork)
+library(L1pack)
+library(fastDummies)
+library(glmnet)
+library(ranger)
+library(furrr)
+# cleaning and pre-processing the Ames data
+source("functions/prepareAmesData.R")
+# list all objects (and custom functions) that exist in our environment
+ls()
+
+```
+
+In this document we will demonstrate how to use the principles of PCS to choose the final prediction. We will demonstrate three different formats of the final prediction based on:
+
+1. The **single "best"** predictive algorithm, in terms of validation set performance from among a range of different algorithms each trained on several different cleaning/pre-processing judgment call-perturbed versions of the training dataset.
+
+1. An **ensemble** prediction, which combines the predictions from a range of predictive fits from across different algorithms and cleaning/pre-processing judgment call-perturbations that pass a predictability screening test.
+
+1. An **interval** of predictions from a range of predictive fits from across different algorithms and data- and cleaning/pre-processing judgment call-perturbations that pass a predictability screening test.
+
+
+## Computing the perturbed predictions
+
+Since each of these approaches will involve each perturbed version of the cleaning/pre-processing judgment call training (and validation) datasets that we used in our stability analyses, (only the final interval approach will involve the data-perturbations), we will create the cleaning/pre-processing judgment call-perturbed datasets and fit the algorithms here.
+
+
+### Create the perturbed datasets
+
+First, let's create the tibble containing the cleaning/pre-processing judgment call perturbed datasets:
+
+```{r}
+param_options <- expand_grid(max_identical_thresh = c(0.65, 0.8, 0.95),
+                             n_neighborhoods = c(10, 20),
+                             impute_missing_categorical = c("other", "mode"),
+                             simplify_vars = c(TRUE, FALSE),
+                             transform_response = c("none", "log", "sqrt"),
+                             cor_feature_selection_threshold = c(0, 0.5),
+                             convert_categorical = c("numeric", "simplified_dummy", "dummy"))
+# create the perturbed datasets in a list column
+ames_jc_perturbed <- param_options |> 
+  rowwise() |>
+  # add training data list column
+  mutate(data_train_perturbed = 
+           list(preProcessAmesData(ames_train_clean,
+                                   max_identical_thresh = max_identical_thresh,
+                                   n_neighborhoods = n_neighborhoods,
+                                   impute_missing_categorical = impute_missing_categorical,
+                                   simplify_vars = simplify_vars,
+                                   transform_response = transform_response,
+                                   cor_feature_selection_threshold = cor_feature_selection_threshold,
+                                   convert_categorical = convert_categorical))) |>
+  # create the perturbed validation set
+  mutate(data_val_perturbed = 
+           list(preProcessAmesData(ames_val_clean,
+                                   max_identical_thresh = max_identical_thresh,
+                                   n_neighborhoods = n_neighborhoods,
+                                   # make sure the validation neighborhoods match the training neighborhoods
+                                   neighborhood_levels = map_chr(str_split(colnames(select(data_train_perturbed, contains("neighborhood"))), "neighborhood_"), ~.[2]),
+                                   impute_missing_categorical = impute_missing_categorical,
+                                   simplify_vars = simplify_vars,
+                                   transform_response = transform_response,
+                                   cor_feature_selection_threshold = cor_feature_selection_threshold,
+                                   convert_categorical = convert_categorical,
+                                   # make sure validation set cols match the training set cols
+                                   column_selection = colnames(data_train_perturbed), 
+                                   keep_pid = TRUE)),
+         # create the perturbed test set
+         data_test_perturbed = 
+           list(preProcessAmesData(ames_test_clean,
+                                   max_identical_thresh = max_identical_thresh,
+                                   n_neighborhoods = n_neighborhoods,
+                                   # make sure the validation neighborhoods match the training neighborhoods
+                                   neighborhood_levels = map_chr(str_split(colnames(select(data_train_perturbed, contains("neighborhood"))), "neighborhood_"), ~.[2]),
+                                   impute_missing_categorical = impute_missing_categorical,
+                                   simplify_vars = simplify_vars,
+                                   transform_response = transform_response,
+                                   cor_feature_selection_threshold = cor_feature_selection_threshold,
+                                   convert_categorical = convert_categorical,
+                                   # make sure validation set cols match the training set cols
+                                   column_selection = colnames(data_train_perturbed), 
+                                   keep_pid = TRUE))) |>
+  # note that some of the judgment call combinations don't actually lead to 
+  # distinct datasets
+  distinct(data_train_perturbed, data_val_perturbed, data_test_perturbed, 
+           .keep_all = TRUE)
+
+# look at the object we just created
+print(ames_jc_perturbed, width = Inf)
+```
+
+
+
+
+### Fitting the algorithms to each perturbed dataset
+
+
+Recall that since it has many lines of code, we wrote a function to generate the ridge and lasso predictions within the tibble. This function is re-defined below:
+
+```{r}
+
+fitRegularizedLs <- function(.data_train, 
+                             .alpha) {
+  
+  
+  x_train <- .data_train %>%
+    dplyr::select(-sale_price) 
+  
+  # standardize the training data
+  x_train <- x_train %>%
+    mutate_all(~(. - mean(.)) / sd(.)) %>%
+    as.matrix
+  y_train <- .data_train %>%
+    pull(sale_price)
+  
+  # CV hyperparameter selection
+  # compute cv.glment
+  reg_cv <- cv.glmnet(x = x_train, y = y_train, 
+                      type.measure="mse", nfolds = 10,
+                      alpha = .alpha)
+  # compute the fit
+  reg_fit <- glmnet(x = x_train, y = y_train, 
+                    lambda = reg_cv$lambda, 
+                    alpha = .alpha)
+  # identify the fit that corresponds to lambda_1se
+  reg_lambda_1se_index <- which(reg_fit$lambda == reg_cv$lambda.1se)
+  
+  return(list(fit = reg_fit,
+              lambda_index = reg_lambda_1se_index))
+}
+
+
+
+predRegularizedLs <- function(.fit, 
+                              .data_train,
+                              .data_val) {
+  
+  
+  x_train <- .data_train %>%
+    dplyr::select(-sale_price) 
+  
+  x_val <- .data_val %>%
+    dplyr::select(-sale_price, -pid)
+  # standardize the validation data
+  x_val <- map2_df(x_val, x_train, function(.x_val, .x_train) {
+    (.x_val - mean(.x_train)) / sd(.x_train)
+  }) %>%
+    as.matrix
+  
+  # standardize the training data
+  x_train <- x_train %>%
+    mutate_all(~(. - mean(.)) / sd(.)) %>%
+    as.matrix
+  y_train <- .data_train %>%
+    pull(sale_price)
+  
+  pred_1se = predict(.fit$fit, x_val)[, .fit$lambda_index]
+  
+  return(pred_1se)
+}
+```
+
+
+Then we can create a version of the tibble that contains the predictions for every algorithm that we considered in this book, trained separately using each judgment call-perturbed version of the training data.
+
+
+The following code creates a tibble with a separate column for the validation set predictions (and the test set predictions) from each algorithm. This code will take a while to run
+
+
+
+```{r}
+#| label: jc-perturbations
+
+# this will take a little while to run
+set.seed(299433)
+perturbed_jc_pred <- ames_jc_perturbed %>%
+  ungroup() %>%
+  # to speed up the computation, you can uncomment the lines below to do the
+  # analysis for just a random subset of judgment call combinations
+  # your conclusions might differ slightly though
+  # sample_n(50) %>%
+  rowwise() %>%
+  # fit each algorithm (lasso and ridge will be fit below) and store them each 
+  # in a column
+  mutate(ls = list(lm(sale_price ~ ., data_train_perturbed)),
+         lad = list(lad(sale_price ~ ., data_train_perturbed, method = "EM")),
+         rf = list(ranger(sale_price  ~ ., data_train_perturbed)),
+         ridge = list(fitRegularizedLs(data_train_perturbed, .alpha = 0)),
+         lasso = list(fitRegularizedLs(data_train_perturbed, .alpha = 1))) %>%
+  # compute validation set predictions for each algorithm 
+  mutate(pred_val_ls = list(predict(ls, data_val_perturbed)),
+         pred_val_lad = list(predict(lad, data_val_perturbed)),
+         pred_val_rf = list(predict(rf, data_val_perturbed)$predictions),
+         pred_val_ridge = list(predRegularizedLs(ridge, data_train_perturbed, data_val_perturbed)),
+         pred_val_lasso = list(predRegularizedLs(lasso, data_train_perturbed, data_val_perturbed))) %>%
+  # compute test set predictions for each algorithm
+  mutate(pred_test_ls = list(predict(ls, data_test_perturbed)),
+         pred_test_lad = list(predict(lad, data_test_perturbed)),
+         pred_test_rf = list(predict(rf, data_test_perturbed)$predictions),
+         pred_test_ridge = list(predRegularizedLs(ridge, data_train_perturbed, data_test_perturbed)),
+         pred_test_lasso = list(predRegularizedLs(lasso, data_train_perturbed, data_test_perturbed))) %>%
+  # add a column with just the actual observed sale price value
+  mutate(true_val = list(data_val_perturbed$sale_price),
+         true_test = list(data_test_perturbed$sale_price),
+         # add a column for the house ids
+         pid_val = list(data_val_perturbed$pid),
+         pid_test = list(data_test_perturbed$pid)) 
+
+print(perturbed_jc_pred, width = Inf)
+```
+
+
+Next, let's create a long-form version of this tibble, which contains a single row for each of the perturbed algorithms that we fit, and compute the performance measures.
+
+```{r}
+perturbed_jc_performance <- perturbed_jc_pred |> 
+  ungroup() %>%
+  # select the relevant validation set prediction performance
+  select(# judgment calls
+    "max_identical_thresh", "n_neighborhoods", "impute_missing_categorical",
+    "simplify_vars", "transform_response", "cor_feature_selection_threshold",
+    "convert_categorical",
+    # val predictions
+    "pred_val_ls", "pred_val_lad", "pred_val_rf", 
+    "pred_val_ridge", "pred_val_lasso", 
+    # val truth
+    "true_val") |>
+  # pivot to a long-form version with one column for all the predictions
+  pivot_longer(cols = c("pred_val_ls", "pred_val_lad", "pred_val_rf", 
+                        "pred_val_ridge", "pred_val_lasso"), 
+               names_to = "algorithm", 
+               values_to = "pred_val", 
+               names_prefix = "pred_val_") %>%
+  rowwise() %>%
+  # undo the log transformation where relevant
+  mutate(pred_val = case_when(transform_response == "log" ~ list(exp(pred_val)),
+                              transform_response == "sqrt" ~ list(pred_val^2),
+                              transform_response == "none" ~ list(pred_val))) %>%
+  mutate(true_val = case_when(transform_response == "log" ~ list(exp(true_val)),
+                              transform_response == "sqrt" ~ list(true_val^2),
+                              transform_response == "none" ~ list(true_val))) %>%
+  # add performance metrics for each perturbed fit
+  mutate(cor = cor(true_val, pred_val),
+         rmse = rmse_vec(true_val, pred_val),
+         mae = mae_vec(true_val, pred_val)) 
+
+print(perturbed_jc_performance, width = Inf)
+```
+
+
+## Approach 1: Choosing a single predictive fit using PCS
+
+Having computed the performance of each of our judgment-call perturbed fits for each algorithm we considered in this book, we can then identify which fit yields the "best" performance.
+
+The following code prints the details of the fits with the highest correlation performance:
+
+```{r}
+ames_top_cor <- perturbed_jc_performance %>% 
+  arrange(desc(cor)) %>%
+  select(algorithm, max_identical_thresh, n_neighborhoods, 
+         impute_missing_categorical, simplify_vars, 
+         transform_response, cor_feature_selection_threshold, 
+         convert_categorical, 
+         cor, rmse, mae) 
+print(head(ames_top_cor), width = Inf)
+```
+
+
+Then we can print the details of the fits with the lowest rMSE (best performance):
+
+```{r}
+ames_top_rmse <- perturbed_jc_performance %>% 
+  arrange(rmse) %>%
+  select(algorithm, max_identical_thresh, n_neighborhoods, 
+         impute_missing_categorical, simplify_vars, 
+         transform_response, cor_feature_selection_threshold, 
+         convert_categorical, 
+         cor, rmse, mae) 
+print(head(ames_top_rmse), width = Inf)
+```
+
+
+And lastly, we can print the details of the fits with the lowest MAE (best performance):
+
+```{r}
+ames_top_mae <- perturbed_jc_performance %>% 
+  arrange(mae) %>%
+  select(algorithm, max_identical_thresh, n_neighborhoods, 
+         impute_missing_categorical, simplify_vars, 
+         transform_response, cor_feature_selection_threshold, 
+         convert_categorical, 
+         cor, rmse, mae) 
+print(head(ames_top_mae), width = Inf)
+```
+
+
+The "best" fit in terms of the correlation measure is the LS algorithm with the following cleaning/pre-processing judgment call options:
+
+- `max_identical_thresh = 0.95`
+
+- `n_neighborhoods = 20`
+
+- `impute_missing_categorical = "mode"`
+
+- `simplify_vars = FALSE`
+
+- `transform_response = "sqrt"`
+
+- `cor_feature_selection_threshold = 0`
+
+- `convert_categorical = "dummy"`
+
+The "best" fit in terms of the rMSE and MAE measure has the exact same set of judgment calls, but involves the LAD algorithm instead of the LS algorithm.
+
+Since the rMSE and MAE measures are slightly more precise than the correlation algorithm, we will use the **LAD algorithm trained on the training set with these particular cleaning/pre-processing judgment calls as our "final" algorithm.**
+
+
+```{r}
+ames_train_preprocessed_selected <- preProcessAmesData(ames_train_clean,
+                                                       max_identical_thresh = 0.95,
+                                                       n_neighborhoods = 20,
+                                                       impute_missing_categorical = "mode",
+                                                       simplify_vars = FALSE,
+                                                       transform_response = "sqrt",
+                                                       cor_feature_selection_threshold = 0,
+                                                       convert_categorical = "dummy")
+single_fit <- lad(sale_price ~ ., 
+                  ames_train_preprocessed_selected,
+                  method = "EM")
+```
+
+### Test set evaluation
+
+Let's then evaluate this final fit using the test set (since our validation set was used to choose it, it can no longer provide an independent assessment of its performance).
+
+First we must create the relevant pre-processed test set.
+
+```{r}
+ames_test_preprocessed_selected <- preProcessAmesData(ames_test_clean,
+                                                      max_identical_thresh = 0.95,
+                                                      n_neighborhoods = 20,
+                                                      impute_missing_categorical = "mode",
+                                                      simplify_vars = FALSE,
+                                                      transform_response = "sqrt",
+                                                      cor_feature_selection_threshold = 0,
+                                                      convert_categorical = "dummy",
+                                                      neighborhood_levels = map_chr(str_split(colnames(select(ames_train_preprocessed_selected, contains("neighborhood"))), "neighborhood_"), ~.[2]), 
+                                                      column_selection = colnames(ames_train_preprocessed_selected))
+
+```
+
+And then we can compute the predictions for the test set and evaluate them.
+
+```{r}
+# compute the predictions for the test set
+# square the predictions because they are predicting the square root of the sale price
+ames_test_pred <- predict(single_fit, ames_test_preprocessed_selected)
+# correlation measure
+cor(ames_test_preprocessed_selected$sale_price^2, ames_test_pred^2)
+# rMSE measure
+rmse_vec(ames_test_preprocessed_selected$sale_price^2, ames_test_pred^2)
+# MAE measure
+mae_vec(ames_test_preprocessed_selected$sale_price^2, ames_test_pred^2)
+```
+
+
+The correlation of the predicted and true test set sale prices are very high. The rMSE and MAE both indicate that the typical sale price error is less than \$20,000.
+
+## Approach 2: PCS ensemble prediction 
+
+In this approach, we take a look at all of the predictions that we computed above (across all algorithms and judgment call combinations), and we first conduct a predictability screening test to ensure that we are not using particularly poorly performing fits to create our ensemble.
+
+Let's visualize the distribution of the rMSE performance measure across all of the algorithms and cleaning/pre-processing judgment calls (grouping by algorithm) using boxplots:
+
+```{r}
+perturbed_jc_performance |>
+  ggplot() +
+  geom_boxplot(aes(x = algorithm, y = rmse))
+```
+
+
+We can also look at the distributions of the judgment calls grouping by the judgment call options, such as the response transformation:
+
+```{r}
+perturbed_jc_performance |>
+  ggplot() +
+  geom_boxplot(aes(x = transform_response, y = rmse))
+```
+
+
+Note that the log- and square root-transformations are much more accurate in general than the fits with the untransformed response ("none") (but there are still some fits with the untransformed response that perform quite well).
+
+A histogram below shows the overall distribution:
+
+```{r}
+perturbed_jc_performance |>
+  ggplot() +
+  geom_histogram(aes(x = rmse))
+```
+
+
+When it comes to an ensemble fit, generally if you have a range of performance measures, you will be able to generate more accurate response predictions if you filter to just the best performing fits. Let's thus conduct a fairly arbitrary **predictability screening test of that requires a validation rMSE set performance in the top 10% of fits**. An ensemble prediction can then be computed by computing the average prediction based on just the top fits.
+
+
+
+### Test set evaluation
+
+To evaluate the ensemble, let's compute the ensemble predictions for each of the *test set* data points using just the fits that passed the predictability screening test.
+
+Let's first identify which fits correspond to a validation set rMSE performance in the top 10% of fits.
+
+```{r}
+# identify the judgment calls and algorithm combinations that correspond
+# to the top 10% of fits
+predictability_screening_fit_params <- perturbed_jc_performance |>
+  # filter to the top 10% of fits in terms of lowest rMSE
+  filter(rmse <= quantile(perturbed_jc_performance$rmse, 0.1)) |>
+  # arrange in order of rMSE
+  arrange(rmse) |>
+  select(algorithm, max_identical_thresh, n_neighborhoods, 
+                impute_missing_categorical, simplify_vars, 
+                transform_response, cor_feature_selection_threshold, 
+                convert_categorical) 
+```
+
+
+Then, let's extract the test set predictions:
+
+
+```{r}
+perturbed_jc_pred_test <- perturbed_jc_pred |> 
+  ungroup() %>%
+  # select the relevant test set predictions for each fit
+  select(
+    # judgment calls
+    max_identical_thresh, n_neighborhoods, impute_missing_categorical,
+    simplify_vars, transform_response, cor_feature_selection_threshold,
+    convert_categorical,
+    # val predictions
+    pred_test_ls, pred_test_lad, pred_test_rf, 
+    pred_test_ridge, pred_test_lasso, 
+    # val truth
+    true_test, pid_test) |>
+  # pivot to a long-form version with one column for all the predictions
+  pivot_longer(cols = c("pred_test_ls", "pred_test_lad", "pred_test_rf", 
+                        "pred_test_ridge", "pred_test_lasso"), 
+               names_to = "algorithm", 
+               values_to = "pred_test", 
+               names_prefix = "pred_test_") %>%
+  rowwise() %>%
+  # undo the log/sqrt transformation where relevant (the predictions are stored 
+  # in nested list columns)
+  mutate(pred_test = case_when(transform_response == "log" ~ list(exp(pred_test)),
+                               transform_response == "sqrt" ~ list(pred_test^2),
+                               transform_response == "none" ~ list(pred_test))) %>%
+  mutate(true_test = case_when(transform_response == "log" ~ list(exp(true_test)),
+                               transform_response == "sqrt" ~ list(true_test^2),
+                               transform_response == "none" ~ list(true_test))) |> 
+  # expand the nested list columns
+  unnest(c("true_test", "pid_test", "pred_test"))
+
+```
+
+
+Then to conduct the predictability screening, we can join the `predictability_screening_fits` object:
+
+```{r}
+perturbed_jc_pred_ensemble_test <- perturbed_jc_pred_test |> 
+  # keep only the rows in perturbed_jc_pred_test that appear in predictability_screening_fits
+  semi_join(predictability_screening_fit_params) |>
+  # compute the average prediction for each test set house
+  group_by(pid_test) |>
+  summarise(ensemble_pred_test = mean(pred_test),
+            true_test = unique(round(true_test))) |>
+  ungroup()
+
+head(perturbed_jc_pred_ensemble_test)
+```
+
+
+The performance of the ensemble predictions can then be computed using the regular metrics
+
+```{r}
+perturbed_jc_pred_ensemble_test %>%
+  # add performance metrics for each perturbed fit
+  summarise(cor = cor(true_test, ensemble_pred_test),
+            rmse = rmse_vec(true_test, ensemble_pred_test),
+            mae = mae_vec(true_test, ensemble_pred_test)) 
+```
+
+According to all three measures, the ensemble performance on the test set is slightly worse than the single-best fit performance.
+
+## Approach 3: Calibrated PCS perturbation prediction intervals
+
+
+The process for computing the perturbation prediction intervals (PPIs) is similar to the ensemble prediction process, but instead of averaging the fits that pass the predictability screening test, we compute an interval from them. First, we need to filter to just the top 10% of fits that passed the predictability screening that we conducted for our ensemble fit.
+
+
+```{r}
+ames_jc_selected <- ames_jc_perturbed %>%
+  # do predictability screening (using the ensemble screening results)
+  # to make the computation more tractable, just take the top 30 fits instead of 
+  # the top 10% (which is 168 fits)
+  inner_join(predictability_screening_fit_params)
+# how many fits pass the predictability screening
+nrow(ames_jc_selected)
+```
+
+Next, for each of these top fits, we will retrain them on $L = 10$ bootstrapped versions of the relevant training dataset using the corresponding algorithm for the fit.
+
+
+First, we will write a function for computing a fit and for generating predictions for each algorithm.
+
+```{r}
+# write a function for fitting each algorithm 
+computeFit <- function(.algorithm, .data_train) {
+  if (.algorithm == "ls") {
+    return(lm(sale_price ~ ., .data_train))
+  } else if (.algorithm == "lad") {
+    return(lad(sale_price ~ ., .data_train, method = "EM"))
+  } else if (.algorithm == "rf") {
+    return(ranger(sale_price  ~ ., .data_train))
+  } else if (.algorithm == "ridge") {
+    return(fitRegularizedLs(.data_train, .alpha = 0))
+  } else if (.algorithm == "lasso") {
+    return(fitRegularizedLs(.data_train, .alpha = 1))
+  }
+}
+
+# write a function for generating a prediction for each algorithm
+predictResponse <- function(fit, .algorithm, .data_train, .data_val) {
+  if (.algorithm %in% c("ls", "lad")) { 
+    return(predict(fit, .data_val))
+  } else if (.algorithm == "rf") {
+    return(predict(fit, .data_val)$predictions)
+  } else if (.algorithm %in% c("ridge", "lasso")) {
+    return(predRegularizedLs(fit,
+                             .data_train, # this doesn't need to be the bootstrapped training set
+                             .data_val))
+  }
+}
+```
+
+In the code below, note that we conduct bootstrapping at the same time as fitting the algorithm. `map_df(1:10, function)` implements the code in the function 10 times, and then concatenates the rows of the data frame output of each iteration. Each iteration can be identified with the `iter` column.
+
+```{r}
+# set up parallel processing so that we can compute the outer map function faster
+plan(multisession)
+set.seed(1789)
+ames_fit_data_jc_perturbed_pred <- future_map_dfr(1:10, function(.iter) {
+  ames_jc_selected %>%
+    # compute a bootstrapped training sample
+    mutate(data_train_perturbed_boot = list(sample_frac(data_train_perturbed, 1, 
+                                                        replace = TRUE))) %>%
+    # then the relevant fits to each bootstrapped jc-perturbed dataset
+    mutate(fit = list(computeFit(algorithm, data_train_perturbed_boot)))  %>%
+    # validation set predictions
+    mutate(pred_val = list(predictResponse(fit, algorithm, 
+                                           data_train_perturbed, 
+                                           data_val_perturbed))) %>%
+    # test set predictions
+    mutate(pred_test = list(predictResponse(fit, algorithm, 
+                                            data_train_perturbed, 
+                                            data_test_perturbed))) %>%
+    # validation set truth and pid
+    mutate(true_val = list(data_val_perturbed$sale_price),
+           pid_val = list(data_val_perturbed$pid)) |>
+    # test set truth and pid
+    mutate(true_test = list(data_test_perturbed$sale_price),
+           pid_test = list(data_test_perturbed$pid)) 
+}, .id = "iter", .options = furrr_options(seed = TRUE))
+
+
+```
+
+We then need to un-transform the response for the fits that involved a transformed response.
+
+
+```{r}
+# un-transform the log- and sqrt-transformed responses
+ames_fit_data_jc_perturbed_pred <- ames_fit_data_jc_perturbed_pred |>
+  rowwise() |>
+  # undo the transformations
+  mutate(pred_val = case_when(transform_response == "log" ~ list(exp(pred_val)),
+                              transform_response == "sqrt" ~ list(pred_val^2),
+                              transform_response == "none" ~ list(pred_val))) %>%
+  mutate(true_val = case_when(transform_response == "log" ~ list(exp(true_val)),
+                              transform_response == "sqrt" ~ list(true_val^2),
+                              transform_response == "none" ~ list(true_val))) %>%
+  mutate(pred_test = case_when(transform_response == "log" ~ list(exp(pred_test)),
+                               transform_response == "sqrt" ~ list(pred_test^2),
+                               transform_response == "none" ~ list(pred_test))) %>%
+  mutate(true_test = case_when(transform_response == "log" ~ list(exp(true_test)),
+                               transform_response == "sqrt" ~ list(true_test^2),
+                               transform_response == "none" ~ list(true_test))) 
+
+```
+
+And we can then compute the uncalibrated intervals for the validation data:
+
+```{r}
+# compute the uncalibrated intervals for the validation data
+ames_val_pred_intervals <- ames_fit_data_jc_perturbed_pred |>
+  dplyr::select(pid_val, true_val, pred_val) |>
+  unnest(cols = c(pid_val, true_val, pred_val)) %>%
+  group_by(pid_val) |>
+  # compute the 5th and 95th quantile predictions
+  summarise(true_val = unique(round(true_val)),
+            median_pred_val = median(pred_val),
+            q05 = quantile(pred_val, 0.05),
+            q95 = quantile(pred_val, 0.95))
+```
+
+
+### Multiplicative calibration
+
+We can compute the coverage of the intervals:
+
+```{r}
+val_coverage <- ames_val_pred_intervals |>
+  mutate(covered = (true_val <= q95) & (true_val >= q05)) %>%
+  summarise(coverage = mean(covered)) %>%
+  pull(coverage)
+val_coverage
+```
+
+This is unfortunately far lower than the 90% coverage that we were aiming for! But that's ok, because we can compute *calibrated* intervals based on the median prediction, of the form:
+
+$$[\textrm{median} - c (\textrm{median} - q_{0.05}), ~~\textrm{median} + c (q_{0.95} - \textrm{median})]$$
+where the constant $\gamma$ is chosen so that the calibrated interval will have a coverage of 0.9.
+
+
+```{r}
+const <- 2.04
+ames_val_pred_intervals <- ames_val_pred_intervals %>%
+  mutate(q05_calibrated = median_pred_val - const * (median_pred_val - q05),
+         q95_calibrated = median_pred_val + const * (q95 - median_pred_val))
+
+```
+
+
+It seems like a constant value of $\gamma$ = 2.04 yields calibrated intervals with coverage of 0.9, as shown below:
+
+```{r}
+val_calibrated_coverage <- ames_val_pred_intervals |>
+  mutate(covered = (true_val <= q95_calibrated) & (true_val >= q05_calibrated)) %>%
+  summarise(coverage = mean(covered)) %>%
+  pull(coverage)
+val_calibrated_coverage
+```
+
+We can visualize the calibrated intervals using a prediction stability plot:
+
+```{r}
+set.seed(3864)
+sample_val_pid <- sample(ames_val_preprocessed$pid, 150)
+
+ames_val_pred_intervals %>%
+  filter(pid_val %in% sample_val_pid) %>%
+  mutate(covered = (true_val <= q95_calibrated) & (true_val >= q05_calibrated)) %>%
+  ggplot() +
+  geom_segment(aes(x = q05_calibrated, xend = q95_calibrated,
+                   y = true_val, yend = true_val, col = covered)) +
+  geom_abline(intercept = 0, slope = 1) +
+  labs(x = "Predicted sale price", y = "Observed sale price") 
+```
+
+
+
+### Test set evaluation
+
+
+Finally, using our calibration constant that we computed using the validation set, and we can generate calibrated prediction perturbation intervals for our test set houses and compute the coverage of the intervals.
+
+Let's compute the intervals for the test set observations as follows (this is using the same `gamma` value that we used before --- it is important *not* to change this value)
+
+```{r}
+ames_test_pred_intervals <- ames_fit_data_jc_perturbed_pred |>
+  dplyr::select(pid_test, true_test, pred_test) |>
+  unnest(cols = c(pid_test, true_test, pred_test)) %>%
+  group_by(pid_test) |>
+  # compute the 5th and 95th quantile predictions
+  summarise(true_test = unique(round(true_test)),
+            median_pred_test = median(pred_test),
+            q05 = quantile(pred_test, 0.05),
+            q95 = quantile(pred_test, 0.95),
+            q05_calibrated = median_pred_test - const * (median_pred_test - q05),
+            q95_calibrated = median_pred_test + const * (q95 - median_pred_test))
+```
+
+
+
+
+And we can compute the coverage of these intervals using the following code:
+
+```{r}
+test_calibrated_coverage <- ames_test_pred_intervals |>
+  mutate(covered = (true_test <= q95_calibrated) & (true_test >= q05_calibrated)) %>%
+  summarise(coverage = mean(covered)) %>%
+  pull(coverage)
+
+test_calibrated_coverage
+```
+
+
+The test set coverage is fairly close to 90%, which is what we were hoping to see.
+
+
+
+
+
+### [Chapter 14, Exercise 17] Additive calibration 
+
+You may want to complete the Chapter 14 additive calibration exercise (exercise 17) here.
+
+
+## [Chapter 14, Exercise 19] Post-hoc evaluation
+
+
+You may want to complete the post-hoc evaluation exercise here.

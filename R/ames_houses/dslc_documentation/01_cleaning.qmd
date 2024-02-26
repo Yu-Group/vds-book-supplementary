@@ -1,0 +1,684 @@
+---
+title: "[Chapter 8] Cleaning the Ames housing data"
+subtitle: "[DSLC stages]: Data cleaning and pre-processing"
+format: 
+  html:
+    css: theme.css
+    toc: true
+    toc-location: right
+    number-depth: 4
+    theme: cerulean
+    df-print: kable
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+Let's start by loading in the libraries that we will use in this document.
+
+```{r setup}
+#| label: setup
+#| message: false
+#| warning: false
+
+# load the libraries we will need in this document
+library(tidyverse)
+library(lubridate)
+library(janitor)
+library(fastDummies)
+```
+
+
+## Domain problem formulation
+
+
+Our overall goal for this project is to develop a predictive algorithm that we can use to predict the sale price of houses in Ames, Iowa.
+
+
+## Data source overview
+
+
+The data we will use was collated in 2011 by Dean De Cock [@de_cock_ames_2011]. The original paper discussing this data can be found [here](http://jse.amstat.org/v19n3/decock.pdf) as well as in the file `data/data_documentation/decock_ames_2011.pdf`. 
+
+De Cock obtained this data directly from the Ames City Assessor's Office following a brief meeting with the Assessor and Deputy Assessor. 
+
+
+## Step 1: Review background information {#sec:bg-info}
+
+
+### Information on data collection 
+
+We don't know a whole lot about how the numbers in the data were collected, i.e. were all houses assessed by the same assessor(s)? Did the assessor collecting the information use a paper form, and then put the information into a spreadsheet or did the assessor collecting the information record it directly on a computer?
+
+We do know that the data De Cock received contained several variables that were very specific to the Assessor's office uses, such as weighting and adjustment factors used in the city's modeling system, and that De Cock removed these variables. 
+
+Note that an Assessor's office is *not* a real-estate office or sales office. The purpose of the assessor's office is "discovering changes in real property, such as new construction, and maintaining the classification and values for the entire tax base of Ames". To be eligible to be appointed an assessor in Iowa for a six-year term, one needs to pass a comprehensive examination. In order to be reappointed, "150 hours of state-approved continuing education, of which at least 90 hours must be
+tested courses, are required during the six-year term". 
+
+This information (and more) was found directly on the [City of Ames](https://www.cityofames.org/government/departments-divisions-a-h/city-assessor/reports) website. We saved the "Ames City Assessor's Budget Proposal for the 2022-2023 Fiscal Year" pdf document in the file `data/data_documentation/additional_assessor_information.pdf`. This document, while not of the same time period as the data we will be examining, gives a reasonable sense of what kind of duties the City Assessor's office performs and what kind of data they collect.
+
+
+
+### Data dictionary
+
+The data dictionary is provided in file `data/additional_info/DataDocumentation.txt`.
+
+
+The response variable for this project is the sale price (`SalePrice`) of each house. The `ORDER` and `PID` columns seem to correspond to row and house identifier columns. 
+
+One thing that we notice is that there are a lot of related variables. 
+
+One question that arises is whether the `Bsmt Unf Sf`, `BsmtFin SF 1`, and `BsmtFin SF 2`, all add up to `Total Bsmt SF`? If so, this may cause issues of colinearity when we try to fit our predictive algorithms unless we remove one of the variables (or remove all three of the sub-variables and just keep `Total Bsmt SF`).
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Question: do the `Bsmt Unf Sf`, `BsmtFin SF 1`, and `BsmtFin SF 2`, all add up to `Total Bsmt SF`**
+:::
+Check whether the three basement square footage variables add up to the total basement square footage variable. If so, likely we will want to remove one of the `Bsmt Unf Sf`, `BsmtFin SF 1`, and `BsmtFin SF 2` variables, or remove all three if we want to actively simplify the data.
+::::
+
+Similarly, we are curious whether general square footage variables (`1st Flr SF`, `2nd Flr SF`, `Total Bsmt SF` and `Low Qual Fin SF`) add up to the `gr_liv_area` variable.
+
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Question: do any combination of the `1st Flr SF`, `2nd Flr SF`, `Total Bsmt SF` and `Low Qual Fin SF` add up to `Gr Liv Area`?**
+:::
+Check whether any combination of the general square footage variables add up to the greater living area variables.  Again, if so, likely we will want to remove one of the `...SF` variables, or remove all three if we want to actively simplify the data.
+::::
+
+
+### Answering questions about the background information
+
+In this section, we will go through the recommended background information questions from the Data Cleaning chapter.
+
+- *What does each variable measure?* Most of the information in the data dictionary is fairly self-explanatory.
+
+- *How was the data collected?* We don't know for sure, but if we are to picture the data collection process we *assume* that an appointed assessor visited each house and recorded the information on a form, and then later input this information into a database or spreadsheet. This is purely speculation, however, since we don't have enough information to be able to properly picture how the data was collected.
+
+- *What are the observational units?* The observational units are the houses.
+
+- *Is the data relevant to my project?* Actually, since we are interested in generating an algorithm to predict the sale price of houses for sale in our current time period, and this dataset spans the years 2006-2010, this data is actually likely *not* relevant to our project. We will explore this more below in @sec-zillow.
+
+
+### Exploring data relevance using zillow data {#sec-zillow}
+
+To explore whether the housing prices from 2006-2010 that is being reflected by this data bear any resemblance to housing prices more than a decade later, we turn to Zillow, which provides a large amount of [public real estate data](https://www.zillow.com/research/data/) (although not at the level of detail on each house that we got from De Cock's Ames Assessor data).
+
+First let's load in the data that we downloaded from Zillow's website (we saved the file as `ames_zillow.csv`):
+
+```{r}
+#| label: zillow-trends
+zillow_prices <- read_csv("../data/ames_zillow.csv")
+```
+
+Next, we will filter to the relevant information:
+
+```{r}
+zillow_prices_ames <- zillow_prices |>
+  filter(RegionName == "Ames", StateName == "IA") |> 
+  select(-RegionID, -SizeRank, -RegionName, -RegionType, -StateName, -State, -Metro, -CountyName) |>
+  pivot_longer(cols = everything(), 
+               names_to = "date", values_to = "price") |>
+  mutate(date = ymd(date)) |>
+  filter(date >= ymd("2005-03-31")) 
+```
+
+Then we will create a line plot that shows the house price trends over time, with the time period covered by De Cock's Assessor's office data highlighted in grey.
+
+```{r}
+zillow_prices_ames |>
+  ggplot() +
+  # add a grey rectangle over the De Cock data study period
+  geom_rect(aes(xmin = ymd("2006-01-01"), xmax = ymd("2010-07-01"), 
+                ymin = -Inf, ymax = Inf), 
+            fill = "grey80", alpha = 0.3) +
+  geom_line(aes(x = date, y = price)) 
+```
+
+It is disturbingly clear that the sale prices during the time period that De Cock's data covers are *very* different to the sale prices a decade later. There is a general trend where house prices in Ames have grown immensely over the past decade, from an average of around \$190,000 in 2010, to an average of around \$240,000 in 2020. Any predictive algorithm that we build using data from 2006 to mid-2010 is going to vastly under-predict the sale price for houses today. 
+
+
+
+Our problem now is that there doesn't exist a publicly available Ames housing dataset (that includes information on the features of the individual houses) for a broader data range. De Cock originally collected this data by getting in touch directly with the Ames City Assessor’s Office, and asking for permission to make the data public. Since we did not want to bother the Assessor's Office for this educational example, and we won't be applying whatever algorithm we create in real life, we will still use this dataset for demonstration purposes, but we will make a compromise: we're going to use our imagination and *pretend that we live in the year 2011* (the year after De Cock's dataset ends).
+
+
+
+## Step 2: Loading the data
+
+Fortunately the data consists of only one single file. But this file is a `.txt` file, rather than a `.csv` file, so we can't use our trusty `read_csv()` function. 
+
+Instead, we will use the generic base R (i.e., non-tidyverse) `read.table()` function. This function requires us to specify how entries are separated from one another in the data. A quick look and experimentation implies that it is tab-separated (every entry in the data is separated by a tab).
+
+```{r}
+ames_orig <- read.table("../data/AmesHousing.txt",
+                               sep = "\t", header = T)
+```
+
+Let's look at the first few rows to make sure it looks like it has been loaded in correctly:
+
+```{r}
+head(ames_orig)
+```
+
+And let's examine the dimension of the data.
+
+```{r}
+dim(ames_orig)
+```
+
+
+Everything seems to match what we expected from the data dictionary above (except the column names got a bit warped in the loading - they now have periods instead of spaces and variables that started with a number now have a preceding "X"). 
+
+
+
+### Filtering to the relevant portion of the data
+
+
+Since we are only interested in *houses* sold in so-called "normal" sales (i.e., we don't want to include foreclosures, within-family sales, sales of incomplete homes, etc), we will filter the data to just include such sales. We will also exclude agricultural, commercial, and industrial sales.
+
+Note that now we are editing the data, we create a new object `ames` so that we still have a copy of the originally loaded dataset in our environment (`ames_orig`).
+
+
+
+```{r}
+ames <- ames_orig |>
+  filter(Sale.Condition == "Normal",
+         # remove agricultural, commercial and industrial
+         !(MS.Zoning %in% c("A (agr)", "C (all)", "I (all)")))
+```
+
+While we could apply whatever data cleaning function we write below to this pre-filtered version of the data, it will be helpful to instead write a function that, if applied to the original (unfiltered) version of the data will do this filtering step too. Thus we will note down a data loading action item to include in our cleaning/pre-processing function.
+
+
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Data loading action item: filter to "normal" sales and zones only**
+:::
+Ensure that the data only contains `Sale Condition == "Normal"` and `MS.Zoning` is not equal to any of `"A (agr)", "C (all)", "I (all)"`
+::::
+
+
+
+## Step 3: Examine the data
+
+In this section we explore the common messy data traits to identify any cleaning action items.
+
+
+
+### Finding invalid values
+
+
+Following the suggested explorations for identifying invalid values, we will first look at randomly selected rows of the data to get a sense for what the values in each column look like. 
+
+```{r}
+ames |>
+  sample_n(10)
+```
+
+#### Numeric variables
+
+
+To explore the validity of the values in the numeric variables, we will first look at the min, max, and mean for each column.
+
+```{r}
+#| label: tbl-ames-summary
+ames |>
+  select_if(is.numeric) |>
+  map_df(~tibble(min = min(., na.rm = TRUE),
+                 max = max(., na.rm = TRUE),
+                 mean = round(mean(., na.rm = TRUE), 2)),
+         .id = "variable") |>
+  # a hack to make it print out all the rows
+  as.data.frame()
+```
+
+
+Since it can be hard to tell if the maximums and minimums are reasonable, it is often helpful to visualize the distribution of each numeric variable using a histogram:
+
+```{r}
+#| label: fig-ames-dist
+#| fig-cap: "Histograms showing the distribution of each variable"
+#| fig-height: 18
+ames |>
+  select_if(is.numeric) |>
+  pivot_longer(everything(), names_to = "variable") |>
+  ggplot() +
+  geom_histogram(aes(x = value), col = "white") +
+  facet_wrap(~variable, scales = "free", ncol = 4)
+```
+
+When the x-axis range of a histogram appears to be much wider than the data (e.g., every value seems to be 0, but the range goes up to 600), this sometimes means that there are some very large values that are atypical. We see this for quite a few of the variables, such as `Misc.Val`, `Low.Qual.Fin.SF`, `Screen.Porch`, etc.
+
+While such atypically large entries are not necessarily in error, their presence should warrant further exploration. Let's look at some of these variables by investigating ordering the values from largest to smallest:
+
+A quick look at the 250 largest values for `Screen.Porch` shows us that, while there are only 200 or so non-zero values (out of more than 2,000), they don't look particularly unusual (they might look unusual look off if all of them were `9999`, for example, or if one was aggressively larger than the rest).
+
+```{r}
+ames |>
+  arrange(desc(Screen.Porch)) |>
+  pull(Screen.Porch) |>
+  head(250)
+```
+Similarly, a look at the largest values for `Low.Qual.Fin.SF` shows that there are only 30 or so non-zero values, rendering this variable fairly uninformative to begin with. The non-zero values themselves don't necessarily look odd.
+
+```{r}
+ames |>
+  arrange(desc(Low.Qual.Fin.SF)) |>
+  pull(Low.Qual.Fin.SF) |>
+  head(100)
+```
+
+We find similar things for the other variables too.
+
+One variable that does look a little bit strange is `Year.Remod.Add`. Notice that there is a strange peak at 1950:
+
+```{r}
+ames |>
+  ggplot() +
+  geom_histogram(aes(x = Year.Remod.Add))
+```
+
+```{r}
+ames |>
+  count(Year.Remod.Add) |>
+  head(10)
+```
+
+Since there are many houses built before 1950, our best guess is that a value of 1950 either means that no remodel was added, or it was added before 1950 before good records were kept.
+
+Another thought that comes to mind is that it is unlikely that every house had a remodel. Let's compare the `Year.Built` variable with the `Year.Remod.Add` variable in the scatterplot below:
+
+```{r}
+ames |>
+  ggplot() +
+  geom_point(aes(x = Year.Built, y = Year.Remod.Add), 
+             alpha = 0.5)
+```
+
+
+
+From the figure, we fortunately see that there were no remodels added *before* the houses were built, and it seems fairly reasonable to assume that most of the remodels listed as 1950 are "fake". It might make sense to replace the `Year.Remod.Add` values of 1950 with the corresponding house's `Year.Built` value.
+
+Let's see how many of the non-1950s remodel houses has their `Year.Remod.Add` value equal to their `Year.Built` value:
+
+```{r}
+ames |>
+  filter(Year.Remod.Add > 1950) |>
+  count(Year.Remod.Add == Year.Built)
+```
+
+Since the vast majority of the post-1950 `Year.Remod.Add` values are indeed equal to the `Year.Built` value, we will make an action item to replace the `Year.Remod.Add` values equal to 1950 with the corresponding `Year.Built` value. 
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Data cleaning action item: Replace `Year.Remod.Add` values of 1950 with the corresponding `Year.Built` value**
+:::
+Since it seems that there is a reporting error that reports all houses built prior to 1950 as having had a remodel in 1950 (likely since there are no *reports* of remodels added prior to 1950), we will replace the `Year.Remod.Add` values of 1950 with the corresponding `Year.Built` value.
+::::
+
+
+#### Categorical variables
+
+Lastly, we will look at the unique values of each categorical value. The following code prints out the unique values for each variable as a list. 
+
+
+```{r}
+ames |>
+  select_if(is.character) |> 
+  map(table)
+```
+
+A few variables, such as `Mas.Vnr.Type`, `Bsmt.Exposure`, `Garage.Finish`, etc have a value that is an empty quote `""`. Let's take a closer look at how often these values occur. According to the following tables counting the number of time each unique variable appears for each variable explored below, it seems that these blank entries are uncommon overall. 
+
+```{r}
+ames |>
+  count(Mas.Vnr.Type)
+```
+
+```{r}
+ames |>
+  count(Bsmt.Exposure)
+```
+
+```{r}
+ames |>
+  count(Garage.Finish)
+```
+
+Let's introduce our first data cleaning action item:
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Data cleaning action item: Replace 'blank' categorical entries with NA**
+:::
+For the categorical variables that have blank entries `""`, replace these blank entries with missing values, `NA`.
+::::
+
+
+
+It also seems that there are several variables that take on one particular value most of the time (and are thus quite uninformative). While these variables are not technically an issue for data *cleaning* (their presence doesn't technically make the data "messy"), we may want to address them in pre-processing by removing all variables whose number of identical values are above some threshold.
+
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Pre-processing action item: Remove variables with a large number of identical values**
+:::
+Since some variables are uninformative and have almost the same value for every house (e.g., 0 for numeric variables), as a pre-processing step, we may want to remove all variables whose proportion of identical values are above a certain threshold, such as 80%. The reason we may want to remove these variables is that their presence can cause issues in our predictive analyses down the line (least squares is known to become unstable when there are such variables present in the data).
+
+Note that the choice of threshold will be a **judgment call** and will thus be implemented as an argument in the pre-processing function.
+::::
+
+
+
+### Examining missing values
+
+
+Let's count the proportion of missing (`NA`) values in each column. There are a few features that have quite a lot of missing values (recall that there are `r nrow(ames)` total observations in the data)!
+
+```{r}
+ames |>
+  map_dbl(~sum(is.na(.)) / nrow(ames)) |>
+  sort(decreasing = TRUE)
+```
+
+There are several variables with almost all of their values missing (note that we are not including values recorded as `""` in these calculations), specifically `Pool.QC`, `Misc.Feature`, and `Alley` each have more than 90% of their values missing, and `Fence` has almost 80% of its values missing, with 17 other variables having fewer numbers of missing values.
+
+Note that there are the same proportion of missing values for each of the `Garage` variables, and for the `Bsmt` variables. 
+
+If you actually read through the data documentation, you would have noticed that there are some situations where a value of `NA` is explicitly defined. For example, for the `Bsmt` variables, the data documentation explicitly says that `NA` means "No Basement", and for the `Garage` variables, it says that `NA` means "No Garage". Assuming that this is correct, this is very helpful information when it comes to deciding how to handle these missing values, and similarly for the `Pool.QC`, `Alley`, and `Fence` variables.
+
+
+
+Recall that, while missing values do not technically make a dataset messy, for our downstream analyses, we will need to pre-process the data prior to applying least squares (or other predictive algorithms) by removing the missing values, either by removing the rows entirely (not recommended unless these rows contain primarily missing data or are missing information in particularly important variables) or by imputing them with a reasonable non-missing value. Since we have information about what these missing values are intended to represent, we can conduct a domain-informed imputation approach for each missing value. 
+
+We are going to argue that since a missing `Garage.Qual`, `Garage.Cond`, etc value or `Bsmt.Qual`, `Bsmt.Cond`, etc value corresponds to "no" garage or basement, that the quality and condition score of a nonexistent garage or basement should be 0 (i.e., lower than all houses that do have a garage or basement).
+
+
+
+
+
+For the categorical variables, such as `Garage.Finish` and `BsmtFin.Type.1`, it would make sense to make a new category that is "no garage", "no basement", etc.
+
+However, you might argue that not having a garage or basement is not as bad as having a really poor quality garage or basement, and thus that it makes more sense to impute the missing values with a "typical" score, such as the most common value. The decision will be a judgment call, as well will incorporate this judgment call into our pre-processing function that we write later in this document. 
+
+One exception to this is the `Garage.Yr.Blt` (the year the garage was built) variable. Neither 0 nor a "typical" value will be the most sensible way to impute missing values in this variable, but rather the most sensible value to impute with (in our opinion) is going to be the year the *house* was built (`Year.Built`).
+
+
+
+
+
+In terms of the variables that have ~80%+ missing values, we will remove them
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Pre-processing action item: Impute variables with fewer than 50% missing values**
+:::
+We will use domain knowledge to impute the missing values for the following variables: `Fireplace.Qu`, `Lot.Frontage`, `Garage.Yr.Blt`, `Garage.Finish`, `Garage.Qual`, `Garage.Cond`, `Garage.Type`, `Bsmt.Exposure`, `BsmtFin.Type.2`, `Bsmt.Qual`, `Bsmt.Cond`, `BsmtFin.Type.1`, `Mas.Vnr.Type`, `Mas.Vnr.Area`, `Electrical`, `Bsmt.Full.Bath`, `Bsmt.Half.Bath`.
+
+The possible imputation methods include replacing the missing values with either 0 or the mean/median value for numeric variables, and for categorical variables, they include creating a new category for missing values or replacing missing values with the most common or "typical" category.
+
+The choice of imputation method is a **judgment call** and will thus be implemented as an argument in the pre-processing function.
+
+There is one exception: since imputing missing values for `Garage.Yr.Blt` with 0 will imply that these garages are much, much, much older than the rest, and imputing with a "typical" (e.g, mean) value seems less reasonable than just imputing with the year the house was built, we will impute `Garage.Yr.Blt` with the `Year.Built` variable.
+::::
+
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Pre-processing action item: Remove variables with more than 50% missing values**
+:::
+Since some variables are uninformative and have almost the same value for every house (e.g., 0 for numeric variables), as a pre-processing step, we may want to remove all variables whose proportion of missing values are above a certain threshold, such as 50%.
+
+Note that the choice of threshold will be a **judgment call**.
+::::
+
+
+
+
+
+### Examining the data format
+
+
+The data is already in a "tidy" format (as opposed to a "long" format or other format), where each row corresponds to the data for a single observational unit, and each column corresponds to a unique type of measurement. 
+
+
+### Assessing column names
+
+The column names need to be cleaned in order to conform to our tidy column name requirements of words in column names being underscore-separated and lowercase.
+
+While there are some variables that it would be nice to manually rename to be more "human" readable, whenever there are more than 20 or so variables, this can be come tedious to do manually, and so we will just clean the current column names (rather than coming up with entirely new names). To do this, we can use the `clean_names()` R function from the `janitor` R package (this will be implemented in the `cleanAmesData()` function that we will write in Step 4). 
+
+
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Data cleaning action item: Clean the column names**
+:::
+Rename the columns so that they are consistently formatted, with underscore-separated words and human readable. We will automate this process using the `clean_names()` function from the `janitor` R package.
+::::
+
+
+### Assessing variable type
+
+The code below prints the type/class of each variable, each of which seems to be a character or an integer.
+
+```{r}
+ames |>
+  map_df(~tibble(class = class(.)), 
+         .id = "variable") |>
+  arrange(class) |>
+  as.data.frame()
+```
+
+
+Since the character variables are all categorical, it will be helpful to convert the character variables to factors (even though many functions will automatically apply this character -> factor conversion, it is helpful to be explicit about it).
+
+
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Data cleaning action item: Convert the character variables to factors**
+:::
+Convert the character variables to factor variables.
+::::
+
+
+Notice that the month (`Mo.Sold`) and year (`Yr.Sold`) variables are integer/numeric variables. This is fine, but it is going to be a lot more useful to have a properly formatted date variable, which we will need to conduct our train/val/test split below. So we will sneak in another action item.
+
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Data cleaning action item: Create a month-year 'date' variable that is properly formatted as a date**
+:::
+Combine the `Mo.Sold` and `Yr.Sold` variables to create a `date` variable that is correctly formatted as a date (we can use the `lubridate` package to do this).
+::::
+
+### Evaluating data completeness
+
+Since we don't have a list of all houses sold in Ames during the data period, we don't know if the data contains all of the houses, but we feel confident in assuming that it does.
+
+### Answering any unanswered questions
+
+Throughout our exploration, we asked a question that we have not yet answered: do the `Bsmt Unf Sf`, `BsmtFin SF 1`, and `BsmtFin SF 2`, all add up to `Total Bsmt SF`?
+
+Let's check whether or not this is the case (it certainly looks like it!):
+
+```{r}
+ames |> 
+  transmute(Total.Bsmt.SF, sum = Bsmt.Unf.SF + BsmtFin.SF.1 + BsmtFin.SF.2)  |>
+  sample_n(10)
+```
+
+```{r}
+ames |> 
+  transmute(Total.Bsmt.SF, sum = Bsmt.Unf.SF + BsmtFin.SF.1 + BsmtFin.SF.2)  |>
+  count(Total.Bsmt.SF == sum)
+```
+
+We don't need to do anything about this to "clean" our data, but we might want to add a pre-processing option since this may cause issues of colinearity with our predictive algorithms
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Pre-processing action item: Remove either the `Total.Bsmt.SF`, or all of the sub-variables: `Bsmt.Unf.SF`, `BsmtFin.SF.1`, `BsmtFin.SF.2`**
+:::
+This will remove any issues of colinearity caused by having variables whose sum is also a variable in the data. 
+::::
+
+
+We similarly wanted to explore the general square footage variables. Again the answer is yes:
+
+```{r}
+ames |>
+  transmute(Gr.Liv.Area, sum = X1st.Flr.SF + X2nd.Flr.SF + Low.Qual.Fin.SF) |>
+  head(20)
+```
+
+
+
+:::: {.blackbox data-latex=""}
+::: {.center data-latex=""}
+**Pre-processing action item: Remove either the `Gr.Liv.Area`, or all of the sub-variables: `X1st.Flr.SF`, `X2nd.Flr.SF`, `Low.Qual.Fin.SF`**
+:::
+This will remove any issues of colinearity caused by having variables whose sum is also a variable in the data. 
+::::
+
+
+## Splitting the data into training, validation and test sets
+
+Since our goal is to apply our eventual analyses to houses that have not yet been sold, i.e., "future" houses, it makes sense to use a *time-split* to split the data into training, validation and test sets.
+
+In order to do this, we need to be able to work with the sale date, which means that we need to use the `date` variable that we created when we cleaned the data. It is generally recommend to split your data into training, validation and test sets *before* applying your cleaning function to each dataset, this is mainly to avoid letting information from the training set bleed into the validation and test sets. This can happen, for instance, if you standardize the data using a standard deviation or another summary of a variable that makes use of all of the observations. However, this happens more often in pre-processing than cleaning (another reason why it often makes sense to have separate cleaning and pre-processing functions), and there is no risk of information bleeding with our cleaning function defined above (this won't always be the case, and you need to justify the validity of any modifications you make to your data prior to splitting).
+
+
+The split that we will conduct will place the first 60% of houses sold in the training set, and the later 40% of houses sold will be randomly divided into the validation and test sets (20% each). The date that separates the training set from the validation and tests sets is:
+
+```{r}
+# identify the date prior to which 60% of the houses have been sold
+split_date <- ames |>
+    unite(date, Mo.Sold, Yr.Sold, 
+          sep = "/", remove = FALSE) |>
+    mutate(date = parse_date(date, "%m/%Y")) |>
+  summarise(quantile(date, c(0.6), type = 1)) |>
+  pull() |>
+  ymd()
+split_date
+```
+
+Then we will define the training data to be all houses sold on or before this date, and the remaining houses, each sold after this date, will be randomly divided into the validation and test sets.
+
+```{r}
+set.seed(286734)
+# define the training set
+ames_train <- ames |>
+  filter(Mo.Sold <= month(split_date) & Yr.Sold <= year(split_date))
+# define the validation set
+ames_val <- ames |>
+  # filter to the houses no in the training set
+  filter(!(PID %in% ames_train$PID)) |>
+  # take a random sample of half
+  sample_frac(0.5)
+ames_test <- ames |>
+  # filter to the houses not in either the training or validation sets
+  filter(!(PID %in% c(ames_train$PID, ames_val$PID)))
+```
+
+
+To confirm that our split did what we expect:
+
+```{r}
+# check the size of each dataset
+dim(ames_train)
+dim(ames_val)
+dim(ames_test)
+```
+
+
+
+
+## Step 4: Prepare the data
+
+Now we implement the loading, cleaning, and pre-processing action items that we proposed in the sections above. 
+
+The data loading action item is:
+
+- Filter to only Normal sale conditions and zones.
+
+The data cleaning action items are
+
+- Clean the column names.
+
+- Replace the missing garage built year, and remodel added years reported as 1950, with the year the house was built.
+
+- Replace 'blank' categorical entries (`""`) with `NA`.
+
+- Create a date-formatted date variable.
+
+- Convert the character variables to factors.
+
+The cleaning function is shown below and is saved in the file "functions/cleanAmesData.R".
+
+```{r}
+#| file: functions/cleanAmesData.R
+```
+
+
+The data pre-processing action items are:
+
+- Remove variables with large numbers of identical values (default threshold 80%).
+
+-  Impute variables with fewer than 50% missing values and remove variables with more than 50% missing values (imputation options for categorical variables include 0 and "typical").
+
+- Remove sub-variables that have a hierarchical relationship (e.g., remove `Bsmt.Unf.SF`, `BsmtFin.SF.1`, `BsmtFin.SF.2`, and similarly for living area variables).
+
+- Create simplified versions of several variables. There are several features that contain related information spread across several variables. It feels like separately these features might be less informative than if they were combined. The option `simplify_vars = TRUE` means we simplify the variables a lot, and `simplify_vars = FALSE` means we simplify a little bit (for most of these variables, we have to perform *some* kind of simplification because the the downstream dummy variables that get created for rare levels can cause issues in our predictive algorithms). Specifically:
+
+    - For categorical variables that have many levels, but most of them are one or two values, it might be helpful to combine the rarer levels into an "other" category, or turn such variables into binary variables (`1` for the primary level, and `0` for any other level). Examples of this include the `roof_style` variable, the `electrical` variable, etc. We also provide an option specifically to do this for the `neighborhood` variable.
+
+    - There are some variables whose information is spread across multiple variables. For instance, the number of bathrooms is spread across `bsmt_full_bath`, `full_bath`, and `half_bath`. We can combine these variables into one `bathrooms` variable by adding them together. 
+
+    - We need to remove collinearity between the basement square footage variables, by either removing the `Total.Bsmt.SF`, keeping the sub-variables (which corresponds to less simplification of the data), or removing all three of the sub-variables (`Bsmt.Unf.SF`, `BsmtFin.SF.1`, `BsmtFin.SF`), which corresponds to more simplification.
+
+
+    - There are also several categorical variables whose levels are intended to be ordered, such as `Ex` (excellent) > `Gd` (good) > `TA` (typical) > `Fa` (fair) > `Po` (poor). Since this ordering is not encoded in the factor levels at all, it might make sense to convert these categories into ordered numbers, which might make it easier for the computer to interpret. We will provide three options for the `convert_categorical` argument: (1) `"numeric"` (convert to numeric), (2) `"simplified_dummy"` (convert to simplified dummy, e.g., lump "excellent" and "good" together, and lump "fair" and "poor" together, etc), (3) `"dummy"` (convert to regular dummy variables) and (4) `"none"` (leave as categorical).
+
+
+
+We have written two separate cleaning and pre-processing functions, but you could include these pre-processing steps in the cleaning function if you preferred (so long as the default options are *not* to conduct these pre-processing steps). 
+
+
+
+The pre-processing function (which is quite long) is shown below and is saved in the file "functions/preProcessAmesData.R".
+
+```{r}
+#| file: functions/preProcessAmesData.R
+
+```
+
+
+
+
+## Data loading, cleaning and pre-processing workflow
+
+
+Wrapping up, the entire code workflow for splitting, cleaning, and pre-processing the Ames data (that we will just copy into the other analysis documents) is saved in the file `prepareAmesData.R`, whose contents is printed below:
+
+```{r}
+#| file: functions/prepareAmesData.R
+```
+
+
+To run this procedure in any document, you can source this file:
+
+```{r}
+source("functions/prepareAmesData.R")
+```
+
+Which will run all of the code in the chunk above.
+
