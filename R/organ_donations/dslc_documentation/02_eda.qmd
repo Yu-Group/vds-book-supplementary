@@ -1,0 +1,699 @@
+---
+title: "[Chapter 5] Exploring the global organ donation trends data"
+subtitle: "[DSLC stages]: EDA"
+format: 
+  html:
+    css: theme.css
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+    df-print: kable
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+In this document, we will conduct an EDA of the organ donation data. The general format of this document is that each section involves asking a question of the data and we then produce several exploratory visualizations to answer the question. Interesting findings are evaluated using PCS, and a few are turned into explanatory findings. 
+
+Let's load and clean/pre-process the organ donation data (recall that we developed the cleaning/pre-processing workflow in the file `01_cleaning.qmd`, and saved our cleaning function in the file `functions/prepareOrganData.R`). It is often helpful to keep a copy of the original uncleaned data in your environment. 
+
+
+```{r}
+#| message: false
+#| warning: false
+library(tidyverse)
+library(superheat)
+library(patchwork)
+
+# load in the function that will allow us to clean the organ data
+source("functions/imputeFeature.R")
+source("functions/prepareOrganData.R")
+
+# load in the original data
+organs_original <- read_csv("../data/global-organ-donation_2018.csv", 
+                            col_types = list(`Utilized DBD` = col_number(),
+                                             `DD Lung Tx` = col_number(),
+                                             `Total Utilized DD` = col_number(),
+                                             `LD Lung Tx` = col_number())) 
+
+# clean and pre-process the data
+organs_preprocessed <- prepareOrganData(organs_original, 
+                                        .impute_method = "average")
+
+```
+
+Next, since many of our explorations will involve looking at the donor *rates*, let's create a version of the original and imputed donor counts *per million* (we could have included this in the `prepareOrganData()` function, since it can be thought of as a pre-processing featurization step). 
+
+```{r}
+# add a donors_per_mil column for each type of imputed donors col
+organs_preprocessed <- organs_preprocessed |>
+  # note that we use `population_imputed + 1` in the denominator because there 
+  # are some countries with a reported population of 0.
+  mutate(total_deceased_donors_per_mil = total_deceased_donors / (population_imputed + 1) * 1000000,
+         total_deceased_donors_imputed_per_mil = total_deceased_donors_imputed / (population_imputed + 1) * 1000000) 
+```
+
+
+
+## High-level summary of the data
+
+The first question we ask is very vague: *what do the variables in the data look like?* Before looking at specific trends, it's helpful to give a high-level summary of the variables of interest (let's focus here on just population, the donor count, and the donor rate per million). These summaries aren't necessarily supposed to tell a story about the trends in the data, but rather are just supposed to give us a sense of what the data itself looks like.
+
+
+```{r}
+#| label: fig-hist-numeric
+#| fig-cap: "Histograms of the population, donor count, and donor rate (per million) variables."
+#| message: false
+#| warning: false
+organs_preprocessed |>
+  filter(year == 2017) |>
+  select(population, total_deceased_donors, total_deceased_donors_per_mil) |>
+  pivot_longer(everything()) |>
+  ggplot() +
+  geom_histogram(aes(x = value), color = "white") +
+  # scales = "free" allows each plot to have its own x-axis 
+  facet_wrap(~name, scales = "free")
+```
+
+
+The donor count and donor count per million seem to have a concentration around 0. 
+
+
+
+## Global organ donations are increasing over time
+
+*Are global organ donations are increasing over time*? 
+
+@fig-global-donor-line shows the increasing trend in (imputed) organ donations across the world over time. The imputed donor counts are based on the "average" imputation method.  
+
+```{r}
+#| label: fig-global-donor-line
+#| fig-cap: "The number of (imputed) organ donations reported each year"
+organs_preprocessed |>
+  # for each year, add up the (imputed) number of organ donations
+  group_by(year) |>
+  summarise(total_donations = sum(total_deceased_donors_imputed)) |>
+  ungroup() |>
+  # plot the number of donations using a line plot
+  ggplot() +
+  geom_line(aes(x = year, y = total_donations)) 
+```
+
+
+
+```{r}
+# compute the number of organ donations in 2017
+total_2017 <- organs_preprocessed |> 
+  filter(year == 2017) |>
+  summarise(total = sum(total_deceased_donors_imputed)) |>
+  pull(total)
+
+# compute the number of organ donations in 2000
+total_2000 <- organs_preprocessed |> 
+  filter(year == 2000) |>
+  summarise(total = sum(total_deceased_donors_imputed)) |>
+  pull(total)
+
+```
+
+The number of (imputed) reported organ donations in 2017 (`r total_2017`) is `r round(total_2017 / total_2000, 1)` times the number of (imputed) reported organ donations in 2000 (`r total_2000`).
+
+Clearly there has been quite a significant increase in organ donations over time. 
+
+### PCS evaluation
+
+#### Stability to a cleaning and pre-processing judgment call
+
+Let's check the stability of the main takeaway from this plot concerning the organ donation trends over time to the imputation judgment call that we made.
+
+@global-trend-stability shows how the trendline using each of the imputation methods (Average imputation, Previous imputation, and no imputation). The "Previous imputation method seems to yield similar results to no imputation (removing missing values), except for in the last year or two. The "Average" imputation method yields higher donor counts overall. The overall trend that the number of organ donations is increasing is certainly stable, but the "Previous" imputation method and no imputation ("None") make the rate of increase seem much more rapid. However, based on our domain understanding of these missing values (and assuming that most of the missing values are more likely to be closer to the "Average" imputed value than the previous imputed value or 0), we feel that the "Average" imputed results are likely to be a better representation of reality.
+
+```{r}
+#| label: fig-global-trend-stability
+#| fig-cap: "The global organ donation trend according to different imputation techniques"
+organs_preprocessed |>
+  # create the "previous" imputed donor count
+  mutate(total_deceased_donors_imputed_previous = 
+           imputeFeature(organs_preprocessed,
+                         .feature = total_deceased_donors, 
+                         .group = country, 
+                         .impute_method = "previous")) |>
+  group_by(year) |>
+  # add up the total donor counts for each year based on the imputation options
+  summarise(None = sum(total_deceased_donors, na.rm = T),
+            Average = sum(total_deceased_donors_imputed),
+            Previous = sum(total_deceased_donors_imputed_previous)) |>
+  ungroup() |> 
+  pivot_longer(c("None", "Average", "Previous"), 
+               names_to = "Imputation method", 
+               values_to = "Donor count") |>
+  ggplot() +
+  geom_line(aes(x = year, y = `Donor count`, color = `Imputation method`), alpha = 0.8) 
+
+```
+
+
+
+
+
+## The US has the *most donors*, but Spain has the *highest donor rate*
+
+
+The next question we want to ask is *which country had the highest number of organ donations per million people in 2017?*. To answer this question, let's first print out the donor counts for the 20 countries with the highest donor counts in 2017. In the table below, it is clear that the US has the most organ donations by far, followed by China and Brazil. 
+
+
+```{r}
+countries_top_20_2017 <- organs_preprocessed |>
+  # filter to 2017
+  filter(year == 2017) |>
+  # arrange in descending order of donor count
+  arrange(desc(total_deceased_donors_imputed)) |>
+  # keep just the top 20 rows
+  head(20) |>
+  select(country, total_deceased_donors_imputed)
+countries_top_20_2017
+```
+
+We can visualize this using a bar chart. 
+
+```{r}
+#| label: fig-bar-2017
+#| fig-cap: "A bar chart showing the number of 2017 organ donations for the 20 countries with the highest number of donations"
+
+organs_preprocessed |>
+  # filter to the top 20 countries in 2017
+  filter(year == 2017, country %in% countries_top_20_2017$country) |>
+  # arrange in descending order of donor count
+  arrange(desc(total_deceased_donors_imputed)) |>
+  # force the countries to appear in the order of donors
+  mutate(country = fct_inorder(country)) |>
+  # create a bar plot
+  ggplot() +
+  geom_col(aes(x = country, y = total_deceased_donors_imputed)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) 
+```
+
+
+Since the populations of each of these countries are quite different, these counts are not actually really comparing apples-to-apples.  Let's instead look at a comparison of the donor counts *per million* for each country. 
+
+
+```{r}
+countries_top_20_2017_per_mil <- organs_preprocessed |>
+  # filter to 2017
+  filter(year == 2017) |>
+  # arrange in descending order of donor count
+  arrange(desc(total_deceased_donors_imputed_per_mil)) |>
+  # keep just the top 20 rows
+  head(20) |>
+  select(country, total_deceased_donors_imputed_per_mil)
+countries_top_20_2017_per_mil
+```
+
+Again, we can visualize this using a bar chart
+
+```{r}
+#| label: fig-bar-2017-per-mil
+#| fig-cap: "A bar chart showing the number of 2017 organ donations per million for the 20 countries with the highest number of donations per million"
+
+organs_preprocessed |>
+  # filter to the top 20 countries in 2017
+  filter(year == 2017, country %in% countries_top_20_2017_per_mil$country) |>
+  # arrange in descending order of donor count per mil
+  arrange(desc(total_deceased_donors_imputed_per_mil)) |>
+  # force the countries to appear in the order of donors per mil
+  mutate(country = fct_inorder(country)) |>
+  # create a bar plot
+  ggplot() +
+  geom_col(aes(x = country, y = total_deceased_donors_imputed_per_mil)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) 
+```
+
+
+When viewed in the context of population size, it appears that *Spain* (not the US) is the clear world-leader in organ donation *Rates*. China and Brazil don't even feature this time (because their number of organ donations are not actually that impressive when viewed in the context of the size of their population).
+
+### PCS evaluation
+
+#### Predictability
+
+A quick literature search revealed that it is a very well-known fact that Spain is the world leader in organ donations. While it seems that many of these reports are based on the same data as this dataset that we are using, the fact that this information seems so broadly reported feels like reasonable evidence of the predictability of this finding. 
+
+Another way that we can demonstrate the predictability of this finding is by showing that it occurs not just in 2017, but also for 2016. The figure below reproduces the two bar charts above, but using the 2016 data. The results are very similar (although the extent to which Spain's rates are higher than Portugal and Croatia's is less extreme).
+
+```{r}
+#| label: fig-bar-2016
+#| fig-cap: "A bar chart showing the number of 2016 organ donations per million for the 20 countries with the highest number of donations per million"
+countries_top_20_2016 <- organs_preprocessed |>
+  filter(year == 2016) |>
+  arrange(desc(total_deceased_donors_imputed)) |>
+  head(20) 
+countries_top_20_2016_per_mil <- organs_preprocessed |>
+  filter(year == 2016) |>
+  arrange(desc(total_deceased_donors_imputed_per_mil)) |>
+  head(20) 
+
+gg_donors_2016 <- organs_preprocessed |>
+  filter(year == 2016, country %in% countries_top_20_2016$country) |>
+  # force the countries to appear in the order of donors per mil
+  arrange(desc(total_deceased_donors_imputed)) |>
+  mutate(country = fct_inorder(country)) |>
+  ggplot() +
+  geom_col(aes(x = country, y = total_deceased_donors_imputed)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) 
+
+gg_donors_2016_per_mil <- organs_preprocessed |>
+  filter(year == 2016, country %in% countries_top_20_2016_per_mil$country) |>
+  # force the countries to appear in the order of donors per mil
+  arrange(desc(total_deceased_donors_imputed_per_mil)) |>
+  mutate(country = fct_inorder(country)) |>
+  ggplot() +
+  geom_col(aes(x = country, y = total_deceased_donors_imputed_per_mil)) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) 
+
+
+gg_donors_2016 + gg_donors_2016_per_mil
+```
+
+#### Stability to a data visualization judgment call
+
+Since this result is unlikely to change due to data perturbations and imputation judgment calls, let's conduct a brief stability analysis evaluating whether our conclusions change if we use a different visualization technique to look at the data. 
+
+The figure below shows a heatmap of the organ donation rate for each country for each year (the rows are arranged in order of the 2017 rate). From this figure it is still very clear that Spain is a world leader in organ donations!
+
+```{r}
+#| label: fig-heatmap-donor
+#| fig-cap: "A heatmap of the donor rate for each country/year"
+organs_preprocessed |>
+  filter(country %in% countries_top_20_2017_per_mil$country) |>
+  # force the countries to appear in the order of donors per mil
+  arrange(desc(year), total_deceased_donors_imputed_per_mil) |>
+  mutate(country = fct_inorder(country)) |>
+  ggplot() +
+  geom_tile(aes(x = year, y = country, 
+                fill = total_deceased_donors_imputed_per_mil),
+            col = "white") +
+  scale_fill_gradient(low = "white", high = "black") +
+  scale_x_continuous(expand = c(0, 0)) +
+  theme(legend.position = "top")
+```
+
+
+
+### Creating an explanatory figure
+
+
+Let's turn this 2017 donor rates per million figure into a nice explanatory figure that we can use to show people Spain's donor rate. 
+
+
+All we will do is clean up the plot by removing the background, tidying the axis names, and highlighting Spain. 
+
+```{r}
+organs_preprocessed |>
+  # filter to the top 20 countries in 2017
+  filter(year == 2017, country %in% countries_top_20_2017_per_mil$country) |>
+  # arrange in descending order of donor count per mil
+  arrange(desc(total_deceased_donors_imputed_per_mil)) |>
+  # force the countries to appear in the order of donors per mil
+  mutate(country = fct_inorder(country)) |>
+  # create a bar plot
+  ggplot() +
+  geom_col(aes(x = country, y = total_deceased_donors_imputed_per_mil, 
+               fill = country == "Spain")) +
+  scale_fill_manual(values = c("grey50", "Orange")) +
+  theme_classic() +
+  labs(x = NULL, y = "Organ donations per million", 
+       title = "Organ donation rates per million in 2017",
+       subtitle = "For the top 20 countries") +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+        legend.position = "none",
+        axis.line = element_blank(),
+        axis.ticks.x = element_blank(), 
+        panel.grid.major.y = element_line(color = "grey90")) 
+```
+
+
+
+
+## Visualizing the donor rates over time for each country
+
+The heatmap in @fig-heatmap-donor that we produced in our stability analysis above gave us an idea that it might be interesting to visualize the donor rates over time using line plots. 
+
+Figure @fig-line-scramble shows the (imputed) number of donations per million for each country. We highlighted a few countries just to make it easier to tease out some interesting trends. This plot is definitely a mess, but it contains some useful information!
+
+```{r}
+#| label: fig-line-scramble
+#| fig-cap: "Trend lines for each country's donor rates"
+#| warning: false
+organs_preprocessed |>
+  #dplyr::filter(year < 2013) |>
+  mutate(highlight = if_else(country %in% c("Spain", "Croatia", "Belgium", "Malta", "United States of America"), as.character(country), "other")) |>
+  ggplot() +
+  geom_line(aes(x = year, y = total_deceased_donors_per_mil, col = highlight, group = country), alpha = 0.5) +
+  scale_color_manual(values = c("#84ACCE", "#F6AE2D", "#589D6F", "grey60", "#CEA1C3", "#E68992"))
+```
+
+
+### PCS evaluations
+
+Since our conclusions from this figure is related to our results above, the PCS evaluations that we conducted above are also relevant to this Figure (e.g., we showed stability to a visualization judgment calls by the same information using a heatmap, and we showed predictability used domain literature to show that it is well-known that Spain is a world leader in organ donation rates). But we can also conduct a PCS analysis of these findings to some data perturbations and some additional visualization judgment calls (such as our choice of which countries lines to include in the plot).
+
+#### Stability to data perturbations
+
+
+To investigate how much our our figure changes as a result of our data perturbations, we create four different versions of the perturbed dataset and overlay the four perturbed trend lines (dashed lines) over the original trend lines (solid lines) in Figure \@ref(fig:lines-highlight-perturb). To reduce overplotting, we filter to the countries that have at least one year with 500 donations. 
+
+Spain's trend lines are highlighted in purple. Fortunately, even with 30% of the organ donor counts perturbed, Spain is consistently the world leader in deceased organ donations, indicating that this conclusion is fairly stable even to these fairly extreme data perturbations.
+
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+
+set.seed(4395)
+perturbed_organs_data <- organs_preprocessed |>
+  # for each country, compute its standard deviation and record it in a column
+  group_by(country) |>
+  mutate(sd = sd(total_deceased_donors_imputed)) |>
+  ungroup() |>
+  # for each row in the data:
+  rowwise() |>
+  # compute four different perturbed versions of the total_deceased_donors variable
+  # this involves adding a random Normal number to 30% of the values. 
+  # Note that we don't add noise to 0 counts. 
+  mutate(donors_pert1 = if_else((total_deceased_donors != 0) & (rbinom(1, 1, 0.3) == 1), 
+                                true = total_deceased_donors + rnorm(1, 0, sd),
+                                false = total_deceased_donors),
+         donors_pert2 = if_else((total_deceased_donors != 0) & (rbinom(1, 1, 0.3) == 1), 
+                                true = total_deceased_donors + rnorm(1, 0, sd),
+                                false = total_deceased_donors),
+         donors_pert3 = if_else((total_deceased_donors != 0) & (rbinom(1, 1, 0.3) == 1), 
+                                true = total_deceased_donors + rnorm(1, 0, sd),
+                                false = total_deceased_donors),
+         donors_pert4 = if_else((total_deceased_donors != 0) & (rbinom(1, 1, 0.3) == 1), 
+                                true = total_deceased_donors + rnorm(1, 0, sd),
+                                false = total_deceased_donors)) |>
+  # filter to countries with at least 500 total donors
+  group_by(country) |>
+  mutate(total_donors = max(total_deceased_donors_imputed)) |>
+  ungroup() |>
+  filter(total_donors > 500) 
+
+# plot the perturbed trendlines and the original trendline
+perturbed_organs_data |> 
+  # add a column that identifies which rows correspond to Spain
+  mutate(Spain = country == "Spain") |>
+  ggplot() +
+  # add the original donor trend lines for each country, and color Spain
+  geom_line(aes(x = year, y = 1000000 * (total_deceased_donors / population), 
+                group = country, col = Spain, alpha = Spain)) +
+  # add the first set of perturbed trend lines for each country, and color Spain
+  geom_line(aes(x = year, y = 1000000 * (donors_pert1 / population), 
+                group = country, col = Spain, alpha = Spain), 
+            linetype = "dashed") +
+  # add the second set of perturbed trend lines for each country, and color Spain
+  geom_line(aes(x = year, y = 1000000 * (donors_pert2 / population), 
+                group = country, col = Spain, alpha = Spain), 
+            linetype = "dashed") +
+  # add the third set of perturbed trend lines for each country, and color Spain
+  geom_line(aes(x = year, y = 1000000 * (donors_pert3 / population), 
+                group = country, col = Spain, alpha = Spain), 
+            linetype = "dashed") +
+  # add the fourth set of perturbed trend lines for each country, and color Spain
+  geom_line(aes(x = year, y = 1000000 * (donors_pert4 / population), 
+                group = country, col = Spain, alpha = Spain), 
+            linetype = "dashed") +
+  scale_color_manual("Country", 
+                     values = c("grey50", "#9C528B"),
+                     labels = c("Other", "Spain")) +
+  labs(y = "Organ donation rates per million") +
+  scale_alpha_manual(values = c(0.3, 1), guide = "none") +
+  theme_classic() 
+```
+
+
+#### Stability to a data visualization judgment call
+
+Next, let's investigate whether our conclusion changes when we change which country's lines are included in our figure. Our original figure filtered to the *top 20* countries in 2017. Alternative judgment calls that we could have made include not filtering the data at all (i.e., including all countries), filtering just to the countries that had at least one year with 500 reported donations, or filtering to the countries that had at least one year with a donor rate of at least 20 donors per million.
+
+The analysis below re-creates the figure using each of these judgment calls.
+
+
+```{r}
+#| label: fig-line-spain-compare
+#| fig-cap: "A series of multi-line plots displaying the organ donation rate per million over time based on four alternative filtering judgment calls (a) all countries, (b) the top 20 countries in 2017, (c) countries that reported at least 500 donors for at least one year, and (d) countries that reported at least 20 donors per million for at least one year."
+#| message: FALSE
+#| warning: FALSE
+
+# create a function that we can re-use to create each plot
+plotLines <- function(data) {
+  gg <- data |> 
+    ggplot() +
+    geom_line(aes(x = year, y = (total_deceased_donors / population) * 1000000, 
+                  col = Spain, alpha = Spain, group = country)) +
+    theme_classic() +
+    scale_color_manual(values = c("grey50", "#9C528B")) +
+    scale_alpha_manual(values = c(0.5, 1)) +
+    labs(y = "Organ donations per million",
+         x = NULL)
+  return(gg)
+}
+
+
+
+# No filtering
+gg_no_filter <- organs_preprocessed |>
+  # add a column that specifies whether the current row corresponds to Spain
+  mutate(Spain = (country == "Spain")) |>
+  plotLines() +
+  ggtitle("(a) No filtering")
+
+
+# filter to the 20 countries with the highest organ donation rates in 2017
+gg_2017 <- organs_preprocessed |>
+  filter(country %in% countries_top_20_2017$country) |>
+  # add a column that specifies whether the current row corresponds to Spain
+  mutate(Spain = (country == "Spain")) |>
+  plotLines() +
+  ggtitle("(b) Top 20 countries in 2017")
+
+
+# Filter to countries with at least 500 donors
+gg_500donors <- organs_preprocessed |>
+  # add a column that specifies whether the current row corresponds to Spain
+  mutate(Spain = (country == "Spain")) |>
+  # compute the largest donor entry for each country and record it in a column
+  group_by(country) |>
+  mutate(total_donors = max(total_deceased_donors_imputed)) |>
+  ungroup() |>
+  # filter to the countries with at least 500 donors in at least one year
+  filter(total_donors > 500) |>
+  # create the figure
+  plotLines() +
+  ggtitle("(c) At least 500 donors")
+
+# Filter to countries with at least 20 donors per million
+gg_20donors_per_mil <- organs_preprocessed |>
+  # add a column that specifies whether the current row corresponds to Spain
+  mutate(Spain = (country == "Spain")) |>
+  # identify the largest donor rate entry for each country and record it in a column
+  group_by(country) |>
+  mutate(total_donors_per_mil = max(total_deceased_donors_imputed / population_imputed) * 1000000) |>
+  ungroup() |>
+  # filter to countries with at least one donor rate entry above 20
+  filter(total_donors_per_mil >= 20) |>
+  plotLines() +
+  ggtitle("(d) At least 20 donors per million")
+
+# combine the plots using patchwork syntax
+(gg_no_filter + gg_2017) / (gg_500donors + gg_20donors_per_mil)
+```
+
+
+
+
+### Creating an explanatory figure
+
+Let's just look at the top 20 countries in 2017, and highlight Spain, Croatia, and the US. From here, you could try and re-create the plots for Spain and Croatia that we created in the book!
+
+```{r}
+#| label: fig-donor-line-plot
+#| fig.cap: "A cleaner line plot of (imputed) donor trends over time"
+
+# create a temporary version of the organs clean dataset that just contains
+# the top 20 countries in 2017 and adds a variable that contains the country
+# name only for the countries of interest and "other" for all other countries
+organs_preprocessed_top_20 <- organs_preprocessed |>
+  filter(country %in% countries_top_20_2017_per_mil$country) |>
+  mutate(highlight = if_else(country %in% c("Spain", "Croatia",
+                                            "United States of America"),
+                             as.character(country), "Other"))
+
+
+organs_preprocessed_top_20 |>
+  ggplot() +
+  # add "Other" the line layers
+  geom_line(aes(x = year, y = total_deceased_donors_imputed_per_mil,
+                group = country),
+            data = filter(organs_preprocessed_top_20, highlight == "Other"),
+            alpha = 0.3, color = "grey50", linewidth = 0.5) +
+  # add the Spain, Croatia, and US line layers
+  geom_line(aes(x = year, y = total_deceased_donors_imputed_per_mil,
+                group = country,
+                col = highlight),
+            data = filter(organs_preprocessed_top_20, highlight != "Other"), linewidth = 1.5) +
+  # add the country name annotation 
+  geom_text(aes(x = year, y = total_deceased_donors_imputed_per_mil,
+                label = country),
+            data = filter(organs_preprocessed_top_20,
+                          highlight != "Other", year == 2017),
+            hjust = 0, nudge_x = 0.3, col = "grey30") +
+  # Choose the colors
+  scale_color_manual("Country", values = c("#84ACCE", "#F6AE2D", "#589D6F"), guide = NULL) +
+  scale_x_continuous(limits = c(2000, 2020), breaks = seq(2000, 2015, 5)) +
+  # remove grid
+  theme_classic() +
+  labs(x = "Year", y = "Donations per million")
+
+```
+
+
+Another way to present this data is using a grid of line plots. 
+
+
+
+```{r}
+#| label: fig-donor-line-grid
+#| fig-cap: "This plot shows a grid of the unimputed donation counts per million over time for each of the top 15 countries in 2017"
+
+organs_preprocessed |>
+  # filter to the top 15 countries in 2017
+  filter(country %in% countries_top_20_2017_per_mil$country[1:15]) |>
+  # make sure that the countries are arranged in 2017 donor rate order
+  arrange(desc(year), desc(total_deceased_donors_imputed_per_mil)) |>
+  mutate(country = fct_inorder(country)) |>
+  # create line plots
+  ggplot() +
+  geom_line(aes(x = year, y = total_deceased_donors_per_mil)) +
+  # split line plots by country
+  facet_wrap(~country, ncol = 3) +
+  # Clean up the the plot
+  scale_y_continuous("Organ donations per million") +
+  scale_x_continuous("Year",
+                     breaks = seq(2000, 2017, 5)) +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.line = element_blank()) +
+  ggtitle("Number of organ donations per million from 2000 to 2017",
+          subtitle = "For the top 20 countries in 2017")
+```
+
+
+
+## The relationship between population and number of donors
+
+Having observed that the donor rate paints a different picture from the raw number of donors, we assumed that countries with larger populations have more donors. Let's check this assumption by asking *do countries with larger populations typically have more donors?*
+
+
+```{r}
+cor_pop_donor <- organs_preprocessed |>
+  filter(year == 2017) |>
+  summarise(cor = cor(population_imputed, total_deceased_donors_imputed)) |>
+  pull(cor)
+cor_pop_donor
+```
+
+The correlation between the (imputed) population and number of donors is `r round(cor_pop_donor, 2)`, which is indicative of a possible weak linear relationship. 
+
+
+Looking at a scatterplot of the two variables does not provide too many hints about this supposed weak linear relationship, however, due to the concentration of values in the lower-left corner. 
+
+```{r}
+#| label: fig-scatter
+#| fig-cap: "A scatterplot of imputed donor rates and population for 2017"
+organs_preprocessed |>
+  filter(year == 2017) |>
+  ggplot() + 
+  geom_point(aes(x = population_imputed, y = total_deceased_donors_imputed),
+             alpha = 0.5) +
+  geom_text(aes(x = population_imputed, y = total_deceased_donors_imputed,
+                label = country),
+             alpha = 0.5, check_overlap = TRUE, hjust = 0, nudge_x = 10000000)
+```
+
+Removing the outlier countries makes it a little easier to see some trends:
+
+```{r}
+#| label: fig-scatter-log
+#| fig-cap: "A log-scale scatterplot of imputed donor rates and population for 2017"
+#| warning: false
+#| message: false
+organs_preprocessed |>
+  filter(year == 2017, total_deceased_donors_imputed < 2500, population_imputed < 500000000) |>
+  ggplot() + 
+  geom_point(aes(x = population_imputed, y = total_deceased_donors_imputed),
+             alpha = 0.5) +
+  geom_text(aes(x = population_imputed, y = total_deceased_donors_imputed,
+                label = country),
+             alpha = 0.5, check_overlap = TRUE, hjust = 0, nudge_x = 10000000)
+```
+
+But taking a log-log transformation of the plot shows that, *if we ignore the countries with zero donations*, there is a reasonable linear relationship between the log of population and the log of donor count (indicating that a percentage increase in population is associated with a percentage increase in donor count). However, by ignoring these countries we risk presenting a severely biased view of the data.
+
+```{r}
+organs_preprocessed |>
+  filter(year == 2017) |>
+  ggplot() + 
+  geom_point(aes(x = population_imputed, y = total_deceased_donors_imputed),
+             alpha = 0.5) +
+  geom_text(aes(x = population_imputed, y = total_deceased_donors_imputed,
+                label = country),
+             alpha = 0.5, check_overlap = TRUE, hjust = 0, nudge_x = 0.05) +
+  geom_smooth(aes(x = population_imputed, y = total_deceased_donors_imputed),
+              method = "lm", se = FALSE, col = "grey") +
+  scale_x_log10() +
+  scale_y_log10()
+```
+
+This finding doesn't feel particularly informative, so we won't turn it into an explanatory finding, nor will we conduct a thorough PCS evaluation of it.
+
+## [Exercise: to complete] Is there a difference in deceased donor type (i.e., whether the organs come from brain death or circulatory death donors) across different countries?
+
+Conduct your own analysis to answer this question. The relevant variables in the pre-processed data (`organs_preprocessed`) will be `deceased_donors_brain_death`, `deceased_donors_circulatory_death`, and `country`.
+
+
+## [Exercise: to complete] Create a dot plot copmaring the organ donation rates for the US and Spain
+
+Below you will find some code for creating the data that underlies the dot plot in Exercise 27 of Chapter 6. Use `geom_line()` and `geom_point()` to create the dot plot. 
+
+```{r}
+organs_preprocessed %>%
+  filter(country %in% c("Spain", "United States of America"), 
+         year == 2017) %>%
+  transmute(country, 
+            kidney = total_kidney_tx / population * 1000000,
+            liver = total_liver_tx / population * 1000000, 
+            heart = total_heart_tx / population * 1000000, 
+            lung = total_lung_tx / population * 1000000) %>%
+  pivot_longer(c("kidney", "liver", "heart", "lung"), 
+               names_to = "organ", values_to = "donation_rate") %>%
+  arrange(donation_rate) %>%
+  mutate(organ = fct_inorder(organ))
+```
+
+
+
+
+
+## Additional explorations
+
+There are many more explorations that you could include in this document if you are editing it yourself (we've only included the ones that appeared in the EDA book chapter), and if you're interested in challenging yourself we encourage you to add a few additional exploration sections to this document.
+
+Start by thinking of a question you have about a data trend or relationship. Perhaps it is related to some of the organ-specific transplant variables that we haven't explored, or perhaps you even want to bring in some external data (such as GDP) to explore whether there is a relationship between GDP and organ donation rates. There are almost infinite avenues that you can explore!
