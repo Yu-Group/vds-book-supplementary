@@ -1,0 +1,36 @@
+---
+title: "Predicting diabetes status using NHANES"
+subtitle: "[DSLC stages]: Analysis"
+format: 
+  html:
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+execute:
+  echo: true
+editor: source
+embed-resources: true
+---
+
+
+
+The following code sets up the libraries and creates cleaned and pre-processed training, validation and test data that we will use in this document.
+
+```{r}
+#| message: false
+#| warning: false
+
+# loading libraries
+library(tidyverse)
+library(janitor)
+library(fastDummies)
+# cleaning and pre-processing the Ames data
+source("functions/prepareDiabetesData.R")
+diabetes <- prepareDiabetesData()
+# list all objects (and custom functions) that exist in our environment
+ls()
+
+```
+
+Fill in this document to complete the diabetes prediction exercise.

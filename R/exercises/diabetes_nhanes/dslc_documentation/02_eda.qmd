@@ -1,0 +1,18 @@
+---
+title: "Exploring the NHANES diabetes"
+subtitle: "[DSLC stages]: EDA"
+format: 
+  html:
+    toc: true
+    toc-location: right
+    number-depth: 3
+    theme: cerulean
+    df-print: kable
+execute:
+  echo: true
+editor: source
+number-sections: true
+embed-resources: true
+---
+
+You can conduct an EDA of the NHANES diabetes dataset in this document.
