@@ -8,7 +8,7 @@ Please use this repository to report any issues (such as errors or typos) for bo
 
 ## Downloading the supplementary materials in this repository
 
-Note that the food nutrition data file is too large to store on GitHub. This means, that when you clone this repository, this data file will be missing.
+Note that the `food_nutrient.csv` data file is too large to store on GitHub. This means, that when you clone this repository, **this data file will be missing**.
 
 You therefore have two options for downloading the supplementary materials.
 
@@ -16,7 +16,7 @@ You therefore have two options for downloading the supplementary materials.
 
 ### Option 1: Clone the repository using `git clone` and manually download the `food_nutrient.csv` data file
 
-If you cloned this repository, and you want to work through the nutrition examples, you will need to [download the `food_nutrient.csv` file](https://drive.google.com/file/d/16bbTE2EphlXLNSivQFi4jBYr8ehgQ5w8/view?usp=sharing). 
+If you cloned this repository, and you want to work through the nutrition examples, you will need to download the [`food_nutrient.csv`](https://drive.google.com/file/d/16bbTE2EphlXLNSivQFi4jBYr8ehgQ5w8/view?usp=sharing) file. 
 
 After downloading this file, you will need to place it in the `R/nutrition/data/` or `python/nutrition/data/` folder for the relevant code to work.
 
