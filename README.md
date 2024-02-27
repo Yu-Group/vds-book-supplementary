@@ -68,3 +68,53 @@ The following table provides a reference for which chapters are associated with 
 | Chapter 13 | `ames_housing/` & `online_shopping/` | `happiness/` & `diabetes_nhanes/` |
 
 
+## Data Sources
+
+Each data source is referenced in the book, but the following list provides the sources for each dataset.
+
+### Organ donation data
+
+The organ donation data comes from Global Observatory on Donation and Transplantation (GODT) and was collected in a collaboration between the World Health Organization (WHO) and the Spanish Transplant Organization, Organización Nacional de Trasplantes (ONT). The data portal can be found at [http://www.transplant-observatory.org/export-database/](http://www.transplant-observatory.org/export-database/).
+
+### Nutrition data
+
+The nutrition food data comes from the US Department of Agriculture's (USDA) **Food and Nutrient Database for Dietary Studies (FNDDS)**, which contains nutrient information compiled for the foods and beverages reported in the "What We Eat in America" survey.
+
+The nutrition databases and associated information from the UDSA website can be found at [https://fdc.nal.usda.gov/](https://fdc.nal.usda.gov/).
+
+### Ames housing data
+
+
+The Ames housing data comes from information on houses sold in Ames from 2006 to 2010 that has been [provided by Dean DeCock](https://jse.amstat.org/v19n3/decock.pdf). According to the paper that he wrote about this dataset, De Cock obtained this data directly from the Ames City Assessor's Office. 
+
+### Online shopping data
+
+The Online Shoppers Purchasing Intention Dataset has been made publicly available by [Sakar et al.](https://www.semanticscholar.org/paper/Real-time-prediction-of-online-shoppers%E2%80%99-purchasing-Sakar-Polat/747e098f85ca2d20afd6313b11242c0c427e6fb3) and can be [downloaded from the UCI Machine Learning repository](https://archive.ics.uci.edu/ml/datasets/Online+Shoppers+Purchasing+Intention+Dataset).]
+
+### Government spending data
+
+The government spending data originally comes from the American Association for the Advancement of Science Historical Trends, and the version that we are using was collated for the [Tidy Tuesday project](https://github.com/rfordatascience/tidytuesday/tree/master/data/2019/2019-02-12).
+
+
+### Growth & Debt data
+
+For this exercise project, the historical public debt data was downloaded from the [International Monetary Fund (IMF)](https://www.imf.org/external/datamapper/datasets) and the gross domestic product (GDP) growth data was downloaded from the [World Bank](https://data.worldbank.org/indicator/NY.GDP.MKTP.KD.ZG).
+
+
+### Penguins data
+
+The palmer penguins exercise data comes from the [`palmerpenguins` R package](https://allisonhorst.github.io/palmerpenguins/) curated by Horst, Hill and Gorman.
+
+
+### Smartphone activity data
+
+The smartphone activity exercise data was collected by [Anguita et al.](https://link.springer.com/chapter/10.1007/978-3-642-35395-6_30) and was downloaded from [the UCI Machine Learning repository](https://archive.ics.uci.edu/ml/datasets/human+activity+recognition+using+smartphones)
+
+
+### Happiness data
+
+The world happiness exercise data comes from the [World Happiness Report](https://worldhappiness.report/ed/2018)
+
+### Diabetes NHANES data
+
+The diabetes NHANES data comes from the collected from the 2016 release of the [National Health and Nutrition Examination Survey (NHANES)](https://www.cdc.gov/nchs/nhanes/index.htm), a program of studies designed to assess the health and nutritional status of adults and children in the United States.
