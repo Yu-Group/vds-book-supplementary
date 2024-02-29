@@ -89,7 +89,7 @@ The Ames housing data comes from information on houses sold in Ames from 2006 to
 
 ### Online shopping data
 
-The Online Shoppers Purchasing Intention Dataset has been made publicly available by [Sakar et al.](https://www.semanticscholar.org/paper/Real-time-prediction-of-online-shoppers%E2%80%99-purchasing-Sakar-Polat/747e098f85ca2d20afd6313b11242c0c427e6fb3) and can be [downloaded from the UCI Machine Learning repository](https://archive.ics.uci.edu/ml/datasets/Online+Shoppers+Purchasing+Intention+Dataset).]
+The Online Shoppers Purchasing Intention Dataset has been made publicly available by [Sakar et al.](https://www.semanticscholar.org/paper/Real-time-prediction-of-online-shoppers%E2%80%99-purchasing-Sakar-Polat/747e098f85ca2d20afd6313b11242c0c427e6fb3) and can be [downloaded from the UCI Machine Learning repository](https://archive.ics.uci.edu/ml/datasets/Online+Shoppers+Purchasing+Intention+Dataset).
 
 ### Government spending data
 
