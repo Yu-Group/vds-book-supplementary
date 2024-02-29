@@ -1,6 +1,7 @@
 [codespell]
 # Ref: https://github.com/codespell-project/codespell#using-a-config-file
-skip = .git,*.pdf,*.css,.codespellrc
+skip = .git,*.pdf,*.css,.codespellrc,*.csv,dslc_documentation,visualize.html,*train.txt,*test.txt,*val.txt
 check-hidden = true
-ignore-regex = ^\s*"image/\S+": ".*
+# ignore images in .ipynb, lines with à - not english
+ignore-regex = ^\s*"image/\S+": ".*|.*à.*|\bMembran\b
 # ignore-words-list =
