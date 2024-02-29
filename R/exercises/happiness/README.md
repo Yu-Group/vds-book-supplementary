@@ -1,4 +1,4 @@
-# World Happiness prediction poject
+# World Happiness prediction project
 
 For this project, your task is to predict a country's happiness score. The data we will use was initially downloaded from the world happiness report website (https://worldhappiness.report/ed/2018/#appendices-and-data) where more information can be found. 
 
