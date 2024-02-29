@@ -125,7 +125,7 @@ ames_train_clean %>%
 ```
 
 
-## Realtionship with the response (sale price)
+## Relationship with the response (sale price)
 
 Let's examine the relationship of several variables with sale price.
 

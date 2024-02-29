@@ -28,7 +28,7 @@ def load_diabetes_data(path = "../data/samadult.csv"):
     diabetes["cancer"] = (diabetes["CANEV"] == 1).astype(int)
     # create family_history_diabetes column
     diabetes["family_history_diabetes"] = (diabetes["DIBREL"] == 1).astype(int)
-    # rename remaning relevant columns
+    # rename remaining relevant columns
     diabetes = diabetes.rename(columns={"AGE_P": "age",
                                       "SMKEV": "smoker",
                                       "SEX": "sex",
@@ -36,7 +36,7 @@ def load_diabetes_data(path = "../data/samadult.csv"):
                                       "BMI": "bmi",
                                       "AHEIGHT": "height"})
 
-    # select just the relevent columns
+    # select just the relevant columns
     diabetes = diabetes[["house_family_person_id",
                         "diabetes",
                         "age",

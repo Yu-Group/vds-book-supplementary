@@ -433,7 +433,7 @@ Out of curiosity, let's explicitly look at the data for some of the countries th
 
 ```{r}
 #| label: tbl-austria
-#| tbl-cap: The TOTAL Acutal DD data for Austria
+#| tbl-cap: The TOTAL Actual DD data for Austria
 organs_original |> 
   filter(COUNTRY == "Austria") |> 
   select(COUNTRY, REPORTYEAR, `TOTAL Actual DD`)
@@ -444,7 +444,7 @@ organs_original |>
 
 ```{r}
 #| label: tbl-peru
-#| tbl-cap: "The TOTAL Acutal DD data for Peru"
+#| tbl-cap: "The TOTAL Actual DD data for Peru"
 organs_original |> 
   filter(COUNTRY == "Peru") |> 
   select(COUNTRY, REPORTYEAR, `TOTAL Actual DD`)

@@ -295,7 +295,7 @@ pred_val_df |>
 To assess the stability of our data to appropriate perturbations in the data, we first need to decide what makes an "appropriate" perturbation. That is, what type of data perturbation (e.g., adding random noise, or performing sampling) most resembles the way that the data *could* have been measured or collected differently, as well as how these results will be applied in the future. 
 
 
-While the Ames housing data does not correspond to a random sample from a greater population of houses, each house is more-or-less exchangeable, meaning that a random sampling technique would be a reasonable perturbation, so we will draw 100 boostrap samples of the original data. 
+While the Ames housing data does not correspond to a random sample from a greater population of houses, each house is more-or-less exchangeable, meaning that a random sampling technique would be a reasonable perturbation, so we will draw 100 bootstrap samples of the original data. 
 
 Moreover, it is plausible that the living area measurements involve a slight amount of measurement error, although we do not have a realistic sense of how much. To really stress-test our results, we choose to add another perturbation to the data that involves adding some random noise to 30% of the `gr_liv_area` measurements. Since the standard deviation of the living area is approximately 500, we decide to add or subtract a random number between 0 and 250 (i.e. add noise up to half a standard deviation) to 30% of `gr_liv_area` observations.
 
