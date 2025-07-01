@@ -23,9 +23,15 @@ split_date <- ames_orig |>
   summarise(quantile(date, c(0.6), type = 1)) |>
   pull() |>
   ymd()
+# Errata note: the following code is what is used in the book, but is incorrect. 
 # define the training set
 ames_train <- ames |>
   filter(Mo.Sold <= month(split_date), Yr.Sold <= year(split_date))
+# This should be 
+# ames_train <- ames |>
+#    filter(Yr.Sold <= year(split_date) | (Mo.Sold <= month(split_date) & Yr.Sold == year(split_date)))
+
+
 # define the validation set
 set.seed(286734) # Do not change this seed once you have started using it!
 ames_val <- ames |>
