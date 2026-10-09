@@ -600,7 +600,66 @@ organs_original |>
   summarise(n = n()) |>
   ggplot() +
   geom_col(aes(x = REPORTYEAR, y = n)) 
+
+
 ```
+
+
+
+```{r}
+organs_original |>
+  group_by(REPORTYEAR) |>
+  summarise(
+    total_rows = n(),
+    missing = sum(is.na(`TOTAL Actual DD`)),
+    non_missing = sum(!is.na(`TOTAL Actual DD`))
+  )
+
+```
+
+
+```{r}
+organs_original |>
+  group_by(REPORTYEAR) |>
+  summarise(
+    total_rows = n(),
+    non_missing = sum(!is.na(`TOTAL Actual DD`))
+  ) |>
+  pivot_longer(
+    cols = c(total_rows, non_missing),
+    names_to = "type",
+    values_to = "count"
+  ) |>
+  ggplot(aes(x = REPORTYEAR, y = count, fill = type)) +
+  geom_col(position = "dodge") +
+  labs(
+    title = "Data Completeness by Year",
+    x = "Year",
+    y = "Number of Observations"
+  )
+```
+
+
+#### My Findings
+
+After comparing the total number of rows with the number of non-missing 
+TOTAL Actual DD values for each year, I noticed a major change starting in 
+2015. From 2000 through 2014, the dataset contains 194 rows per year, 
+representing all 194 countries. However, in 2015, the number of rows drops to
+111, then to 80 in 2016, and 64 in 2017.
+
+Interestingly, the number of missing values within existing rows decreases 
+significantly after 2014. In 2015, only 7 of the 111 rows contain missing 
+donor counts, while in 2016 and 2017, none of the existing rows have missing 
+values for TOTAL Actual DD.
+
+This suggests that the decline in available data after 2014 is primarily
+due to missing country-year observations rather than NA values within 
+existing rows. To address this issue, I would add the missing country-year 
+combinations and fill their values with NA before performing any imputation.
+
+
+
 
 One exploration idea is to modify the code above to overlay another bar chart (using a different color) of the number of non-missing `TOTAL Actual DD` counts. 
 
@@ -719,4 +778,3 @@ organs_clean_previous |>
   select(country, year, population, 
          total_deceased_donors, total_deceased_donors_imputed)
 ```
-

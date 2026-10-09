@@ -21,18 +21,53 @@ editor_options:
 
 ## Domain problem formulation
 
+The goal of this project is to examine the relationship between government debt and economic growth. Specifically, we want to investigate whether countries with higher public debt relative to GDP experience lower economic growth, as suggested by Reinhart and Rogoff's study.
 
 ## Data source overview
 
+We will use two datasets. The first contains historical public debt as a percentage of GDP from the International Monetary Fund (IMF). The second contains annual GDP growth rates from the World Bank.
 
 
 ## Step 1: Review background information {#sec-bg-info}
 
+The debt dataset covers historical debt information from 1800 to 2015, while the growth dataset contains 266 country, territory, and regional or economic aggregate entries from 1960 to 2021.
+
+Each observation in the cleaned datasets should represent a unique country-year combination.
 
 ### Data dictionary
 
+The final cleaned datasets will contain the following variables:
+
+- **country:** The country for which the observation was recorded.
+- **year:** The year of the observation.
+- **debt_pct_gdp:** Public debt expressed as a percentage of GDP.
+- **growth_pct_gdp:** Annual GDP growth rate expressed as a percentage.
+
+Before combining these datasets, we will need to check for missing values, inconsistent country names, and differences in how the data is organized.
+
+
 
 ## Step 2: Loading in the data
+
+```{r}
+library(tidyverse)
+library(readxl)
+
+debt_raw <- read_excel("data/debt.xls")
+growth_raw <- read_csv("data/growth.csv")
+
+
+
+glimpse(debt_raw)
+glimpse(growth_raw)
+
+growth_raw <- read_csv("data/growth.csv", skip = 4)
+
+glimpse(growth_raw)
+
+
+
+```
 
 
 ## Step 3: Examine the data and create action items
@@ -40,13 +75,269 @@ editor_options:
 ### Finding invalid values
 
 
+```{r}
+# Examine the first few rows of each dataset
+head(debt_raw[, 1:6])
+head(growth_raw[, 1:8])
+
+# Check missing values
+sum(is.na(growth_raw))
+sum(debt_raw == "no data", na.rm = TRUE)
+```
+
+
+The debt dataset contains 31,836 entries labeled "no data", while the growth dataset contains 4,335 NA values. These represent missing observations rather than actual numerical measurements.
+
+The debt dataset also has an empty first row. Before further analysis, we should remove this row and convert "no data" entries to NA so that debt values can be stored numerically.
+
+**Data cleaning action items:**
+- Remove the empty first row from the debt dataset.
+- Convert "no data" entries into NA.
+- Preserve missing growth values as NA rather than replacing them with zero.
+
+
+
+
+
 ### Assessing Column names
+
+
+
+```{r}
+names(debt_raw)[1:10]
+names(growth_raw)[1:10]
+```
+
+
+Both datasets use a wide format, where each year is stored as a separate column. The debt dataset identifies countries using the column "DEBT (% of GDP)", while the growth dataset uses "Country Name".
+
+To make the datasets easier to analyze and combine, we should rename the country column to `country`, convert the year columns into a single `year` column, and create numerical columns named `debt_pct_gdp` and `growth_pct_gdp`.
+
+The growth dataset also contains extra identifier columns that are not necessary for the final analysis.
+
+**Data cleaning action item:** Convert both datasets from wide to long format and standardize their column names.
+
+
 
 
 
 ### Assessing variable type
 
+```{r}
+class(debt_raw$`1960`)
+class(growth_raw$`1961`)
+class(growth_raw$`Country Name`)
+```
+
+
+The debt dataset stores its yearly debt values as character variables rather than numeric variables. This is partly because missing values are represented by the text "no data". These values need to be converted to NA, and the remaining debt values should be converted to numeric.
+
+The growth dataset already stores its country names as characters and its available growth values as numeric. Some year columns containing only missing values may be stored as logical variables.
+
+**Data cleaning action item:** Convert debt percentages and growth percentages to numeric values while preserving missing observations as NA.
+
+
 
 ### Assessing data completeness
 
+
+```{r}
+# Check for missing country names
+sum(is.na(debt_raw$`DEBT (% of GDP)`))
+sum(is.na(growth_raw$`Country Name`))
+
+# Check for duplicate country names
+sum(duplicated(debt_raw$`DEBT (% of GDP)`))
+sum(duplicated(growth_raw$`Country Name`))
+
+# Check how many years each dataset contains
+sum(grepl("^[0-9]{4}$", names(debt_raw)))
+sum(grepl("^[0-9]{4}$", names(growth_raw)))
+```
+
+
+The debt dataset contains two rows with missing country names and one duplicate country-name entry. The duplicate is likely caused by the repeated missing country name. The growth dataset contains no missing or duplicate country names.
+
+The debt dataset contains 216 year columns from 1800 to 2015, while the growth dataset contains 62 year columns from 1960 to 2021. Therefore, the datasets have different time ranges.
+
+Both datasets also contain missing measurements, so the final cleaned dataset will not have complete numerical information for every country-year combination.
+
+**Data cleaning action items:**
+- Examine and remove non-country rows from the debt dataset.
+- Restrict the debt data to 1960 onward.
+- Reshape both datasets so each country-year combination has one row.
+- Check that country-year combinations are unique after cleaning.
+- Preserve missing values when combining the datasets.
+
+
+
+```{r}
+debt_raw |>
+  filter(is.na(`DEBT (% of GDP)`)) |>
+  select(1:6)
+```
+
+
+
 ## Step 4: Clean and pre-process the data
+
+```{r}
+clean_debt <- function(data) {
+  data |>
+    filter(!is.na(`DEBT (% of GDP)`)) |>
+    rename(country = `DEBT (% of GDP)`) |>
+    pivot_longer(
+      cols = matches("^\\d{4}$"),
+      names_to = "year",
+      values_to = "debt_pct_gdp"
+    ) |>
+    mutate(
+      year = as.integer(year),
+      debt_pct_gdp = as.numeric(na_if(debt_pct_gdp, "no data"))
+    ) |>
+    filter(year >= 1960) |>
+    select(country, year, debt_pct_gdp)
+}
+
+debt_clean <- clean_debt(debt_raw)
+
+debt_clean |>
+  filter(country == "Australia", year <= 1969)
+```
+
+
+
+
+
+```{r}
+clean_growth <- function(data) {
+  data |>
+    rename(country = `Country Name`) |>
+    pivot_longer(
+      cols = matches("^\\d{4}$"),
+      names_to = "year",
+      values_to = "growth_pct_gdp",
+      values_transform = list(growth_pct_gdp = as.numeric)
+    ) |>
+    mutate(year = as.integer(year)) |>
+    select(country, year, growth_pct_gdp)
+}
+
+growth_clean <- clean_growth(growth_raw)
+
+growth_clean |>
+  filter(country == "Australia", year <= 1969)
+```
+
+
+
+
+
+
+
+```{r}
+combine_data <- function(debt, growth) {
+  full_join(debt, growth, by = c("country", "year"))
+}
+
+combined_clean <- combine_data(debt_clean, growth_clean)
+
+combined_clean |>
+  filter(country == "Australia", year <= 1969) |>
+  arrange(year)
+```
+
+
+
+
+```{r}
+# Countries in the debt dataset but not in the growth dataset
+setdiff(unique(debt_clean$country), unique(growth_clean$country))
+
+# Countries in the growth dataset but not in the debt dataset
+setdiff(unique(growth_clean$country), unique(debt_clean$country))
+```
+
+
+
+```{r}
+combine_data <- function(debt, growth) {
+
+  # Standardize country names in the debt data
+  debt <- debt |>
+    mutate(country = recode(country,
+      "China, People's Republic of" = "China",
+      "Congo, Dem. Rep. of the" = "Congo, Dem. Rep.",
+      "Congo, Republic of" = "Congo, Rep.",
+      "Czech Republic" = "Czechia",
+      "Côte d'Ivoire" = "Cote d'Ivoire",
+      "Egypt" = "Egypt, Arab Rep.",
+      "Hong Kong SAR" = "Hong Kong SAR, China",
+      "Iran" = "Iran, Islamic Rep.",
+      "Korea, Republic of" = "Korea, Rep.",
+      "Lao P.D.R." = "Lao PDR",
+      "Micronesia, Fed. States of" = "Micronesia, Fed. Sts.",
+      "Saint Kitts and Nevis" = "St. Kitts and Nevis",
+      "Saint Lucia" = "St. Lucia",
+      "Saint Vincent and the Grenadines" = "St. Vincent and the Grenadines",
+      "South Sudan, Republic of" = "South Sudan",
+      "Syria" = "Syrian Arab Republic",
+      "São Tomé and Príncipe" = "Sao Tome and Principe",
+      "Turkey" = "Turkiye",
+      "Venezuela" = "Venezuela, RB",
+      "Yemen" = "Yemen, Rep."
+    ))
+
+  # Join using standardized country names and years
+  full_join(debt, growth, by = c("country", "year"))
+}
+
+combined_clean <- combine_data(debt_clean, growth_clean)
+
+combined_clean |>
+  filter(country == "Australia", year <= 1969) |>
+  arrange(year)
+```
+
+
+```{r}
+combined_clean |>
+  summarise(
+    total_rows = n(),
+    missing_debt = sum(is.na(debt_pct_gdp)),
+    missing_growth = sum(is.na(growth_pct_gdp))
+  )
+
+
+combined_clean |>
+  count(country, year) |>
+  filter(n > 1)
+```
+
+
+### Combining the datasets
+
+Before merging the two datasets, I compared their country names and found several inconsistencies. For example, the debt dataset uses "Egypt" while the growth dataset uses "Egypt, Arab Rep.". Similar differences occur for China, the Czech Republic, and several other countries.
+
+I standardized these country names so that observations from the same country can be matched correctly. I then used a full join based on country and year, preserving observations that appear in only one dataset.
+
+The datasets also contain aggregate categories, such as income groups and regional classifications, which should be distinguished from individual countries in any country-level analysis.
+
+
+
+
+
+
+
+### Validating the combined dataset
+
+After standardizing country names and combining the debt and growth datasets using a full join, the resulting dataset contains 16,884 country-year and aggregate-year observations.
+
+Of these, 9,439 observations have missing debt values and 4,461 have missing GDP growth values. These missing values were preserved rather than replaced with zero.
+
+I also checked for duplicate country-year combinations and found none, confirming that each country-year combination appears only once.
+
+One remaining consideration is that the original data includes some regional and income-group aggregates. These should be excluded if the analysis is restricted to individual countries.
+
+
+
